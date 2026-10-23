@@ -99,12 +99,10 @@ void EcAdapterTcp::fail_cycle_(const char *reason, bool peer_closed) {
   this->close_socket_();
   this->state_ = State::IDLE;
 
-  if (peer_closed) {
-    // The server actively dropped the connection. Give it time to clean up the
-    // old socket before reconnecting, otherwise the next connect is accepted
-    // but immediately reset again.
-    this->last_connect_attempt_ = millis();
-  }
+  // Any failure leaves the previous socket unusable, and the bridge needs a
+  // moment to free its client slot. Without the cooldown the retry connects
+  // immediately and is either reset again or lands in a "no slot" state.
+  this->last_connect_attempt_ = millis();
 
   if (this->queue_.empty())
     return;
