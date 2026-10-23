@@ -122,11 +122,12 @@ void EcAdapterTcp::fail_cycle_(const char *reason, bool peer_closed) {
     log_hex_("Failed PDU", front.pdu.data(), front.pdu.size());
 
   if (front.is_write) {
-    // The bridge resets long-lived sockets on write, but accepts a write
-    // that arrives on a freshly opened connection. So on a peer reset we
-    // reconnect (the cooldown in start_next_request_ enforces that) and
-    // retry the same write. Upgrade to FC16 on the first retry.
-    if (peer_closed && front.retries > 0) {
+    // Writes are user commands. Any failure - peer reset, timeout or a closed
+    // connection - is worth retrying: the bridge often only accepts a write on
+    // a freshly opened connection and silently drops FC06 (no RTU reply, so
+    // the bridge just times out and closes our socket). On the first retry we
+    // also upgrade to FC16, which the RTU adapter handles reliably.
+    if (front.retries > 0) {
       front.retries--;
       if (!front.use_fc16) {
         front.use_fc16 = true;
