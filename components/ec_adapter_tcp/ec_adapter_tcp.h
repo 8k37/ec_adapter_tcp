@@ -91,6 +91,10 @@ class EcAdapterTcp : public PollingComponent {
   // connection or answers with an exception). All later writes then go out as
   // FC16 directly, without the 1 s reconnect cooldown after the reset.
   bool writes_use_fc16_{false};
+  // address -> (value, millis()) for writes the adapter acknowledged but that
+  // have not yet been confirmed by a read-back. Used to detect adapters that
+  // accept the Modbus write but silently ignore it.
+  std::map<uint16_t, std::pair<uint16_t, uint32_t>> pending_writes_;
 };
 
 }  // namespace ec_adapter_tcp

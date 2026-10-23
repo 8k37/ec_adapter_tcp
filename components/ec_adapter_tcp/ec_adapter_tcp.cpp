@@ -518,6 +518,7 @@ void EcAdapterTcp::finish_request_() {
       ESP_LOGE(TAG, "Write 0x%04X = %u rejected (Modbus exception 0x%02X). The bridge/RTU adapter"
                     " refuses write function codes for this register.",
                req.address, (unsigned) req.value, code);
+      this->pending_writes_.erase(req.address);
       this->queue_.erase(this->queue_.begin());
     } else if (req.count > 1) {
       // Split the range so one unsupported register does not hide the rest.
@@ -548,9 +549,23 @@ void EcAdapterTcp::finish_request_() {
   bool ok = false;
   if (pdu[0] == 0x03 && req.count > 0) {
     if (pdu.size() >= 2 && pdu[1] == req.count * 2 && pdu.size() >= (size_t) (2 + req.count * 2)) {
-      for (uint16_t i = 0; i < req.count; i++)
-        this->registers_[(uint16_t) (req.address + i)] =
-            (uint16_t) ((pdu[2 + i * 2] << 8) | pdu[3 + i * 2]);
+      uint32_t now = millis();
+      for (uint16_t i = 0; i < req.count; i++) {
+        uint16_t addr = (uint16_t) (req.address + i);
+        uint16_t value = (uint16_t) ((pdu[2 + i * 2] << 8) | pdu[3 + i * 2]);
+        this->registers_[addr] = value;
+        auto it = this->pending_writes_.find(addr);
+        if (it == this->pending_writes_.end())
+          continue;
+        if (it->second.first == value) {
+          this->pending_writes_.erase(it);
+        } else if ((uint32_t) (now - it->second.second) > 30000) {
+          ESP_LOGW(TAG, "Write 0x%04X = %u was acknowledged but the adapter still reports %u; "
+                        "the adapter accepted the Modbus write but did not apply it",
+                   addr, (unsigned) it->second.first, (unsigned) value);
+          this->pending_writes_.erase(it);
+        }
+      }
       this->warned_ranges_.erase(req.address);
       ok = true;
     } else {
@@ -558,6 +573,7 @@ void EcAdapterTcp::finish_request_() {
     }
   } else if ((pdu[0] == 0x06 || pdu[0] == 0x10) && req.is_write) {
     this->registers_[req.address] = req.value;
+    this->pending_writes_[req.address] = {req.value, millis()};
     if (req.use_fc16)
       this->writes_use_fc16_ = true;
     ESP_LOGI(TAG, "Write 0x%04X = %u applied (FC%02X)", req.address, (unsigned) req.value, pdu[0]);
@@ -573,10 +589,12 @@ void EcAdapterTcp::finish_request_() {
       ESP_LOGD(TAG, "Unexpected write response, retrying 0x%04X with FC16", req.address);
       return;
     }
-    if (req.is_write)
+    if (req.is_write) {
+      this->pending_writes_.erase(req.address);
       ESP_LOGE(TAG, "Write 0x%04X = %u failed - the server answered but not with a write"
                     " acknowledgement",
                req.address, (unsigned) req.value);
+    }
   }
 
   this->queue_.erase(this->queue_.begin());
