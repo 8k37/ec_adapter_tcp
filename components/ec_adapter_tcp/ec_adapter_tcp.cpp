@@ -160,6 +160,7 @@ bool EcAdapterTcp::recv_exact_(uint8_t *data, size_t len) {
 }
 
 bool EcAdapterTcp::transact_(const uint8_t *pdu, size_t pdu_len, std::vector<uint8_t> &response) {
+  this->last_exception_ = 0;
   if (!this->ensure_connected_())
     return false;
 
@@ -191,8 +192,8 @@ bool EcAdapterTcp::transact_(const uint8_t *pdu, size_t pdu_len, std::vector<uin
     return false;
 
   if (response[0] & 0x80) {
-    ESP_LOGW(TAG, "Modbus exception 0x%02X for function 0x%02X", response.size() > 1 ? response[1] : 0,
-             pdu[0]);
+    this->last_exception_ = response.size() > 1 ? response[1] : 0xFF;
+    ESP_LOGD(TAG, "Modbus exception 0x%02X for function 0x%02X", this->last_exception_, pdu[0]);
     return false;
   }
   return true;
@@ -272,10 +273,25 @@ void EcAdapterTcp::update() {
   for (auto &range : ranges) {
     std::vector<uint16_t> values;
     if (!this->read_holding_(range.first, range.second, values)) {
+      if (this->last_exception_ != 0) {
+        // The adapter answered, it just does not expose this register. The TCP
+        // stream is still in sync, so keep polling the remaining ranges instead
+        // of failing the whole update cycle.
+        if (this->warned_ranges_.insert(range.first).second) {
+          ESP_LOGW(TAG, "Register 0x%04X is not available (Modbus exception 0x%02X), skipping",
+                   range.first, this->last_exception_);
+        } else {
+          ESP_LOGV(TAG, "Register 0x%04X still unavailable (exception 0x%02X)", range.first,
+                   this->last_exception_);
+        }
+        continue;
+      }
+      // Transport level failure: the connection is in an unknown state.
       this->close_connection_();
       ESP_LOGW(TAG, "Read of 0x%04X (%u regs) failed", range.first, (unsigned) range.second);
       return;
     }
+    this->warned_ranges_.erase(range.first);
     for (size_t i = 0; i < values.size(); i++)
       this->registers_[(uint16_t) (range.first + i)] = values[i];
   }

@@ -55,6 +55,8 @@ class EcAdapterTcp : public PollingComponent {
   std::vector<EcAdapterTcpListener *> listeners_;
   std::set<uint16_t> addresses_;
   std::map<uint16_t, uint16_t> registers_;
+  uint8_t last_exception_{0};
+  std::set<uint16_t> warned_ranges_;
 };
 
 }  // namespace ec_adapter_tcp
