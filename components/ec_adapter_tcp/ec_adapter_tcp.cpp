@@ -28,8 +28,7 @@ static void log_hex_(const char *prefix, const uint8_t *data, size_t len) {
   size_t pos = 0;
   for (size_t i = 0; i < shown && pos + 4 < sizeof(buf); i++)
     pos += snprintf(buf + pos, sizeof(buf) - pos, "%02X ", data[i]);
-  ESP_LOGV(TAG, "%s (%u bytes%s): %s", prefix, (unsigned) len,
-           len > 32 ? ", truncated" : "", buf);
+  ESP_LOGV(TAG, "%s (%u bytes%s): %s", prefix, (unsigned) len, len > 32 ? ", truncated" : "", buf);
 }
 
 static std::vector<uint8_t> build_write_pdu(uint16_t address, uint16_t value, bool use_fc16) {
@@ -101,10 +100,9 @@ void EcAdapterTcp::fail_cycle_(const char *reason, bool peer_closed) {
   this->state_ = State::IDLE;
 
   if (peer_closed) {
-    // The server actively dropped the connection. Give it time to clean up
-    // the old socket before reconnecting, otherwise the next connect is
-    // accepted but immediately reset again (the modbus_bridge on the same
-    // ESP needs to free the previous client slot first).
+    // The server actively dropped the connection. Give it time to clean up the
+    // old socket before reconnecting, otherwise the next connect is accepted
+    // but immediately reset again.
     this->last_connect_attempt_ = millis();
   }
 
@@ -113,7 +111,6 @@ void EcAdapterTcp::fail_cycle_(const char *reason, bool peer_closed) {
 
   Request &front = this->queue_.front();
 
-  // Log the exact request that failed so wire-level problems are visible.
   if (front.is_write) {
     ESP_LOGW(TAG, "Failed write 0x%04X = %u (FC%02X) after %s", front.address,
              (unsigned) front.value, front.use_fc16 ? 0x10 : 0x06, reason);
@@ -124,17 +121,6 @@ void EcAdapterTcp::fail_cycle_(const char *reason, bool peer_closed) {
   if (!front.pdu.empty())
     log_hex_("Failed PDU", front.pdu.data(), front.pdu.size());
 
-      ESP_LOGD(TAG, "Write 0x%04X = %u retrying with FC16", front.address, (unsigned) front.value);
-      return;
-    }
-    ESP_LOGE(TAG, "Write 0x%04X = %u failed: %s. Both FC06 and FC16 were rejected or got no reply -"
-=======
-    ESP_LOGE(TAG, "Write 0x%04X = %u failed: %s. Both FC06 and FC16 were rejected or got no reply -"
-                  " check that the Modbus TCP server/bridge forwards write function codes to the RTU"
-                  " adapter (many modbus_bridge builds support reads only by default).",
-             front.address, (unsigned) front.value, reason);
-    this->queue_.erase(this->queue_.begin());
-=======
   if (front.is_write) {
     // Writes are user commands, never drop them on the first failure:
     //  - if we haven't tried FC16 yet, fall back to it and remember the choice
@@ -149,17 +135,6 @@ void EcAdapterTcp::fail_cycle_(const char *reason, bool peer_closed) {
       ESP_LOGD(TAG, "Write 0x%04X = %u retrying with FC16", front.address, (unsigned) front.value);
       return;
     }
-    ESP_LOGE(TAG, "Write 0x%04X = %u failed: %s. Both FC06 and FC16 were rejected or got no reply -"
-                  " check that the Modbus TCP server/bridge forwards write function codes to the RTU"
-                  " adapter (many modbus_bridge builds support reads only by default).",
-             front.address, (unsigned) front.value, reason);
-    this->queue_.erase(this->queue_.begin());
-=======
-      ESP_LOGD(TAG, "Write 0x%04X = %u retrying with FC16", front.address, (unsigned) front.value);
-      return;
-    }
-    ESP_LOGE(TAG, "Write 0x%04X = %u failed: %s. Both FC06 and FC16 were rejected or got no reply -"
-=======
     ESP_LOGE(TAG, "Write 0x%04X = %u failed: %s. Both FC06 and FC16 were rejected or got no reply -"
                   " check that the Modbus TCP server/bridge forwards write function codes to the RTU"
                   " adapter (many modbus_bridge builds support reads only by default).",
@@ -363,8 +338,7 @@ void EcAdapterTcp::start_next_request_() {
 
   if (this->sock_ < 0) {
     uint32_t now = millis();
-    if (this->last_connect_attempt_ != 0 &&
-        (uint32_t) (now - this->last_connect_attempt_) < 1000)
+    if (this->last_connect_attempt_ != 0 && (uint32_t) (now - this->last_connect_attempt_) < 1000)
       return;  // throttled, try again on the next loop iteration
     this->last_connect_attempt_ = now;
     this->start_connect_();
@@ -542,8 +516,8 @@ void EcAdapterTcp::finish_request_() {
         return;
       }
       ESP_LOGE(TAG, "Write 0x%04X = %u rejected (Modbus exception 0x%02X). The bridge/RTU adapter"
-                    " refuses write function codes for this register.", req.address,
-               (unsigned) req.value, code);
+                    " refuses write function codes for this register.",
+               req.address, (unsigned) req.value, code);
       this->queue_.erase(this->queue_.begin());
     } else if (req.count > 1) {
       // Split the range so one unsupported register does not hide the rest.
@@ -601,7 +575,8 @@ void EcAdapterTcp::finish_request_() {
     }
     if (req.is_write)
       ESP_LOGE(TAG, "Write 0x%04X = %u failed - the server answered but not with a write"
-                    " acknowledgement", req.address, (unsigned) req.value);
+                    " acknowledgement",
+               req.address, (unsigned) req.value);
   }
 
   this->queue_.erase(this->queue_.begin());
@@ -622,14 +597,13 @@ bool EcAdapterTcp::write_register(uint16_t address, uint16_t value) {
   req.pdu = build_write_pdu(address, value, req.use_fc16);
   // Writes are user commands and must not wait behind a full polling cycle.
   // While state_ != IDLE, queue_.front() is the in-flight request, so insert
-  // right after it and before any pending reads. Insertion time between
+  // right after it and before any pending reads. Insertion order between
   // multiple writes is preserved.
   size_t pos = (this->state_ == State::IDLE) ? 0 : 1;
   while (pos < this->queue_.size() && this->queue_[pos].is_write)
     pos++;
   this->queue_.insert(this->queue_.begin() + pos, req);
-  ESP_LOGD(TAG, "Queued write 0x%04X = %u at position %u", address, (unsigned) value,
-           (unsigned) pos);
+  ESP_LOGD(TAG, "Queued write 0x%04X = %u at position %u", address, (unsigned) value, (unsigned) pos);
   return true;
 }
 
