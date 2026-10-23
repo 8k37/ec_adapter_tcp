@@ -133,7 +133,10 @@ void EcAdapterTcp::fail_cycle_(const char *reason, bool peer_closed) {
                (unsigned) front.value, reason);
       return;
     }
-    ESP_LOGW(TAG, "Write 0x%04X = %u failed: %s", front.address, (unsigned) front.value, reason);
+    ESP_LOGE(TAG, "Write 0x%04X = %u failed: %s. Both FC06 and FC16 were rejected or got no reply -"
+                  " check that the Modbus TCP server/bridge forwards write function codes to the RTU"
+                  " adapter (many modbus_bridge builds support reads only by default).",
+             front.address, (unsigned) front.value, reason);
     this->queue_.erase(this->queue_.begin());
   } else {
     // Reads: retry once on a peer-closed connection, drop on a timeout (the
@@ -396,7 +399,17 @@ void EcAdapterTcp::send_step_() {
     this->tx_sent_ += (size_t) n;
   }
 
-  log_hex_("TX", this->tx_buf_.data(), this->tx_buf_.size());
+  bool is_write = !this->queue_.empty() && this->queue_.front().is_write;
+  if (is_write) {
+    char hex[3 * 32 + 1];
+    size_t shown = this->tx_buf_.size() > 32 ? 32 : this->tx_buf_.size();
+    size_t pos = 0;
+    for (size_t i = 0; i < shown && pos + 4 < sizeof(hex); i++)
+      pos += snprintf(hex + pos, sizeof(hex) - pos, "%02X ", this->tx_buf_[i]);
+    ESP_LOGI(TAG, "TX write PDU (%u bytes): %s", (unsigned) this->tx_buf_.size(), hex);
+  } else {
+    log_hex_("TX", this->tx_buf_.data(), this->tx_buf_.size());
+  }
   this->deadline_ = millis() + this->timeout_ms_;
   this->state_ = State::RECEIVING;
 }
@@ -499,7 +512,8 @@ void EcAdapterTcp::finish_request_() {
         ESP_LOGD(TAG, "FC06 rejected (exception 0x%02X), retrying 0x%04X with FC16", code, req.address);
         return;
       }
-      ESP_LOGW(TAG, "Write 0x%04X = %u rejected (Modbus exception 0x%02X)", req.address,
+      ESP_LOGE(TAG, "Write 0x%04X = %u rejected (Modbus exception 0x%02X). The bridge/RTU adapter"
+                    " refuses write function codes for this register.", req.address,
                (unsigned) req.value, code);
       this->queue_.erase(this->queue_.begin());
     } else if (req.count > 1) {
@@ -555,7 +569,8 @@ void EcAdapterTcp::finish_request_() {
       return;
     }
     if (req.is_write)
-      ESP_LOGW(TAG, "Write 0x%04X = %u failed", req.address, (unsigned) req.value);
+      ESP_LOGE(TAG, "Write 0x%04X = %u failed - the server answered but not with a write"
+                    " acknowledgement", req.address, (unsigned) req.value);
   }
 
   this->queue_.erase(this->queue_.begin());
