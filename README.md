@@ -8,27 +8,16 @@ Works on any ESP32 variant with Wi-Fi (tested with ESP32-C6, ESP-IDF framework).
 
 ## Usage
 
-## Write-only registers on first connect
+## Current temperature
 
-`REG_W_*` registers (`0x0030`, `0x0031`..`0x0039`, `0x0080`) cannot be read:
-a FC03 read returns `0` whatever was written. After a reboot the adapter
-therefore keeps whatever state it had, while Home Assistant would show the
-last value this device wrote.
+`climate` shows a current temperature only if it is told where to get one.
+Two options:
 
-To keep both sides in sync, the last value written by each entity is
-persisted in flash (ESPHome preferences) and **pushed once on the first poll
-cycle after boot**:
-
-- `select` — the stored option (or `initial_value` if flash is empty);
-- `number` — the last written value;
-- `climate` — the work mode and the setpoint, but only if they were set at
-  least once (an implicit default is never written, so a fresh device does not
-  change the boiler state by itself).
-
-The log shows one line per restored register:
-
-### Restore retries
-
-Restore runs on the first poll cycle after boot. If the adapter is offline at
-that moment the value is not lost: the pending writes stay queued and are
-retried on the next cycles (up to 3 rounds). After that a warning is logged
+- **`current_temperature_address`** (recommended) — a *readable* register of
+  the adapter that holds the boiler's measured temperature, e.g. the coolant
+  sensor. Add `current_temperature_scale` if the raw value is scaled
+  (default `1.0`). The value is read as a signed 16-bit integer, so sub-zero
+  readings work.
+- **`sources`** — external sensors (this component's `sensor`, a Home
+  Assistant sensor, …). When at least one source is configured it takes
+  precedence over `current_temperature_address`.
