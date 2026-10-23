@@ -3,7 +3,7 @@ import esphome.config_validation as cv
 from esphome.const import CONF_ID
 
 CODEOWNERS = ["@8k37"]
-DEPENDENCIES = ["network"]
+DEPENDENCIES = ["network", "wifi"]
 # entities.h includes the headers of all entity types unconditionally, so every
 # one of them must be part of the build even when the YAML only uses a subset.
 AUTO_LOAD = ["binary_sensor", "button", "climate", "number", "select", "sensor"]

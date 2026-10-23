@@ -13,6 +13,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include "esphome/components/network/util.h"
 #include "esphome/core/log.h"
 
 namespace esphome {
@@ -26,9 +27,9 @@ void EcAdapterTcp::dump_config() {
   ESP_LOGCONFIG(TAG, "ectoControl adapter (Modbus TCP):");
   ESP_LOGCONFIG(TAG, "  Host: %s", this->host_.c_str());
   ESP_LOGCONFIG(TAG, "  Port: %u", (unsigned) this->port_);
-  if (this->host_ == "127.0.0.1" || this->host_ == "localhost") {
-    ESP_LOGW(TAG, "  Host is set to localhost: from an ESP that is the device itself, "
-                  "not the adapter. Use the adapter's LAN address instead.");
+  if (this->host_is_self_()) {
+    ESP_LOGE(TAG, "  Host points at this ESP itself, not at the adapter. "
+                  "Set host: to the adapter's LAN address.");
   }
   ESP_LOGCONFIG(TAG, "  Unit ID: %u", (unsigned) this->unit_id_);
   ESP_LOGCONFIG(TAG, "  Response timeout: %u ms", (unsigned) this->timeout_ms_);
@@ -65,9 +66,24 @@ void EcAdapterTcp::close_connection_() {
   this->connected_ = false;
 }
 
+bool EcAdapterTcp::host_is_self_() const {
+  if (this->host_ == "127.0.0.1" || this->host_ == "localhost")
+    return true;
+  // Compare against the address this ESP currently uses. get_use_address()
+  // returns an empty string while Wi-Fi is still coming up, in which case we
+  // simply skip the check instead of producing a false positive.
+  std::string own = network::get_use_address();
+  return !own.empty() && own == this->host_;
+}
+
 bool EcAdapterTcp::ensure_connected_() {
   if (this->sock_ >= 0)
     return true;
+
+  if (this->host_is_self_()) {
+    ESP_LOGE(TAG, "Refusing to connect to %s: that is this ESP's own address", this->host_.c_str());
+    return false;
+  }
 
   struct addrinfo hints;
   memset(&hints, 0, sizeof(hints));
