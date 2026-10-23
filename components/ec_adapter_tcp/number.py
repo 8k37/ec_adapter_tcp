@@ -9,6 +9,7 @@ DEPENDENCIES = ["ec_adapter_tcp"]
 
 CONF_ADDRESS = "address"
 CONF_SCALE = "scale"
+CONF_INITIAL_VALUE = "initial_value"
 
 EcAdapterTcpNumber = ec_adapter_tcp_ns.class_("EcAdapterTcpNumber", cg.Component, number.Number)
 
@@ -20,6 +21,10 @@ CONFIG_SCHEMA = number.number_schema(EcAdapterTcpNumber).extend(
         cv.Optional(CONF_MAX_VALUE, default=100.0): cv.float_,
         cv.Optional(CONF_STEP, default=1.0): cv.float_,
         cv.Optional(CONF_SCALE, default=1.0): cv.float_,
+        # Published and pushed to the adapter when nothing has been written from
+        # this device yet (empty flash). The register is write-only, so this is
+        # the only way to give it a defined state on a fresh flash.
+        cv.Optional(CONF_INITIAL_VALUE): cv.float_,
     }
 )
 
@@ -39,3 +44,11 @@ async def to_code(config):
     cg.add(var.set_address(config[CONF_ADDRESS]))
     cg.add(var.set_scale(config[CONF_SCALE]))
     cg.add(var.set_range(config[CONF_MIN_VALUE], config[CONF_MAX_VALUE], config[CONF_STEP]))
+    if CONF_INITIAL_VALUE in config:
+        initial = config[CONF_INITIAL_VALUE]
+        if initial < config[CONF_MIN_VALUE] or initial > config[CONF_MAX_VALUE]:
+            raise cv.Invalid(
+                f"initial_value {initial} is outside the range "
+                f"{config[CONF_MIN_VALUE]}..{config[CONF_MAX_VALUE]}"
+            )
+        cg.add(var.set_initial_value(initial))

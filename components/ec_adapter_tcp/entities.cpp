@@ -115,11 +115,23 @@ void EcAdapterTcpNumber::setup() {
   // adapter once after boot, because it cannot be read from it.
   this->pref_ = global_preferences->make_preference<uint16_t>(this->get_object_id_hash() ^ 0x9E3779B9u);
   uint16_t stored = 0;
-  if (!this->pref_.load(&stored))
+  if (this->pref_.load(&stored)) {
+    float divisor = this->scale_ == 0.0f ? 1.0f : this->scale_;
+    this->publish_state((float) stored / divisor);
+    this->hub_->add_restore_write(this->address_, stored);
     return;
-  float divisor = this->scale_ == 0.0f ? 1.0f : this->scale_;
-  this->publish_state((float) stored / divisor);
-  this->hub_->add_restore_write(this->address_, stored);
+  }
+  // Empty flash (first boot after flashing): fall back to initial_value so the
+  // entity is not unknown and the adapter gets a defined value. Like the
+  // stored one, it is only pushed once the adapter acknowledges the write.
+  if (this->has_initial_value_) {
+    float multiplier = this->scale_ == 0.0f ? 1.0f : this->scale_;
+    uint16_t raw = (uint16_t) lroundf(this->initial_value_ * multiplier);
+    this->publish_state(this->initial_value_);
+    this->hub_->add_restore_write(this->address_, raw);
+    ESP_LOGD(TAG, "Using initial_value %.3f (raw %u) for 0x%04X", this->initial_value_,
+             (unsigned) raw, this->address_);
+  }
 }
 
 void EcAdapterTcpNumber::dump_config() {

@@ -82,6 +82,14 @@ class EcAdapterTcpNumber : public Component, public number::Number, public EcAda
     this->max_value_ = max_value;
     this->step_ = step;
   }
+  // Value published and pushed to the adapter when nothing has been written
+  // from this device yet (empty flash, e.g. right after the first flash). The
+  // register is write-only, so without it the entity stays unknown until the
+  // user sets a value by hand.
+  void set_initial_value(float value) {
+    this->initial_value_ = value;
+    this->has_initial_value_ = true;
+  }
 
  protected:
   EcAdapterTcp *hub_{nullptr};
@@ -90,6 +98,8 @@ class EcAdapterTcpNumber : public Component, public number::Number, public EcAda
   float min_value_{0.0f};
   float max_value_{100.0f};
   float step_{1.0f};
+  float initial_value_{0.0f};
+  bool has_initial_value_{false};
   // Last value written, persisted in flash: the register is write-only, so it
   // cannot be read back after a reboot.
   ESPPreferenceObject pref_;

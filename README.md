@@ -54,3 +54,32 @@ The thermostat needs a known current temperature, i.e. one of the sources
 described above (an external sensor is the reliable choice: the write-only
 work-mode register cannot be read back).
 ## Reference `climate` configuration
+## Number entities
+
+`number` writes a single 16-bit register. The ectoControl `REG_W_*` registers
+are **write-only**: a read returns `0`, so the value cannot be read back from
+the adapter. The component therefore keeps the last value it wrote in flash and
+pushes it back once after boot.
+
+Options:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `address` | — (required) | Register address, e.g. `0x0031` |
+| `min_value` | `0.0` | Lower bound in user units |
+| `max_value` | `100.0` | Upper bound in user units |
+| `step` | `1.0` | UI step |
+| `scale` | `1.0` | `raw = value * scale` (multiplier, unlike the climate's `temperature_scale` which divides) |
+| `initial_value` | — | Value used when flash holds nothing yet |
+
+What gets published, in order:
+
+1. the last value written from this device (restored from flash), pushed to the
+   adapter once the connection is up;
+2. otherwise `initial_value`, also pushed to the adapter;
+3. otherwise nothing — the entity stays `unknown` until you set a value, and no
+   write is sent.
+
+`initial_value` is validated against `min_value`/`max_value`. It is written to
+the adapter only when the adapter acknowledges it; if the adapter is offline at
+boot the hub retries, then logs a warning instead of silently losing it.
