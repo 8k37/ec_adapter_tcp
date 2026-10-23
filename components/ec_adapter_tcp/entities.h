@@ -136,6 +136,8 @@ class EcAdapterTcpClimate : public Component, public climate::Climate, public Ec
 
   void set_hub(EcAdapterTcp *hub) { this->hub_ = hub; }
   void set_address(uint16_t address) { this->address_ = address; }
+  void set_temperature_address(uint16_t address) { this->temperature_address_ = address; }
+  void set_temperature_scale(float scale) { this->temperature_scale_ = scale; }
   void set_on_value(uint16_t value) { this->on_value_ = value; }
   void set_off_value(uint16_t value) { this->off_value_ = value; }
   void set_visual_temperatures(float min_temperature, float max_temperature, float step) {
@@ -161,9 +163,11 @@ class EcAdapterTcpClimate : public Component, public climate::Climate, public Ec
   void on_source_value_(uint8_t index, float value);
 
   EcAdapterTcp *hub_{nullptr};
-  uint16_t address_{0x0030};
-  uint16_t on_value_{0};
-  uint16_t off_value_{1};
+  uint16_t address_{0x0039};
+  uint16_t temperature_address_{0x0031};
+  float temperature_scale_{10.0f};
+  uint16_t on_value_{1};
+  uint16_t off_value_{0};
   float min_temperature_{5.0f};
   float max_temperature_{30.0f};
   float step_{0.5f};
