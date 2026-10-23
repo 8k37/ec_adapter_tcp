@@ -147,6 +147,11 @@ class EcAdapterTcpClimate : public Component, public climate::Climate, public Ec
   void set_address(uint16_t address) { this->address_ = address; }
   void set_temperature_address(uint16_t address) { this->temperature_address_ = address; }
   void set_temperature_scale(float scale) { this->temperature_scale_ = scale; }
+  // Readable register that reports the boiler's actual current temperature
+  // (e.g. the coolant sensor). Optional: when left at 0 the current
+  // temperature can only come from an external source (add_temperature_source).
+  void set_current_temperature_address(uint16_t address) { this->current_temperature_address_ = address; }
+  void set_current_temperature_scale(float scale) { this->current_temperature_scale_ = scale; }
   void set_on_value(uint16_t value) { this->on_value_ = value; }
   void set_off_value(uint16_t value) { this->off_value_ = value; }
   void set_visual_temperatures(float min_temperature, float max_temperature, float step) {
@@ -175,6 +180,8 @@ class EcAdapterTcpClimate : public Component, public climate::Climate, public Ec
   uint16_t address_{0x0030};
   uint16_t temperature_address_{0x0031};
   float temperature_scale_{10.0f};
+  uint16_t current_temperature_address_{0};
+  float current_temperature_scale_{1.0f};
   uint16_t on_value_{0};
   uint16_t off_value_{1};
   float min_temperature_{5.0f};

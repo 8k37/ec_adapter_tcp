@@ -244,6 +244,12 @@ void EcAdapterTcpClimate::setup() {
     // return 0, not the applied value. Do not poll them; the hub caches the
     // value from the write acknowledgement and on_registers_updated() reads
     // that cache, mirroring the HA integration's optimistic behaviour.
+    //
+    // The current temperature, in contrast, is a normal readable register:
+    // poll it when the user pointed us at one, otherwise current_temperature
+    // stays NaN until an external source publishes a value.
+    if (this->current_temperature_address_ != 0)
+      this->hub_->add_read_register(this->current_temperature_address_, 1);
   }
 
   // The setpoint is a local (virtual) room temperature; persist it across reboots.
@@ -321,6 +327,13 @@ void EcAdapterTcpClimate::dump_config() {
                 (unsigned) this->on_value_, (unsigned) this->off_value_);
   ESP_LOGCONFIG(TAG, "  Target temperature register: 0x%04X (scale x%.3f, write-only)",
                 this->temperature_address_, this->temperature_scale_);
+  if (this->current_temperature_address_ != 0) {
+    ESP_LOGCONFIG(TAG, "  Current temperature register: 0x%04X (scale x%.3f)",
+                  this->current_temperature_address_, this->current_temperature_scale_);
+  } else {
+    ESP_LOGCONFIG(TAG, "  Current temperature: external sources only (%u configured)",
+                  (unsigned) this->sources_.size());
+  }
   ESP_LOGCONFIG(TAG, "  Setpoint: local, initial %.1f, range %.1f..%.1f step %.1f",
                 this->initial_target_temperature_, this->min_temperature_, this->max_temperature_, this->step_);
 }
@@ -331,6 +344,7 @@ climate::ClimateTraits EcAdapterTcpClimate::traits() {
   traits.set_visual_min_temperature(this->min_temperature_);
   traits.set_visual_max_temperature(this->max_temperature_);
   traits.set_visual_temperature_step(this->step_);
+  traits.set_supports_current_temperature(true);
   return traits;
 }
 
@@ -351,7 +365,20 @@ void EcAdapterTcpClimate::on_registers_updated() {
     this->target_temperature = (float) target_raw / divisor;
   }
 
-  // current_temperature is fed externally via set_current_temperature().
+  // Current temperature: fed by an external source (on_source_value_) when at
+  // least one is configured, otherwise read from the adapter's own readable
+  // register. Without either, current_temperature stays NaN and Home Assistant
+  // shows no current temperature at all.
+  if (this->sources_.empty() && this->current_temperature_address_ != 0) {
+    uint16_t current_raw = 0;
+    if (this->hub_->read_register(this->current_temperature_address_, &current_raw)) {
+      float divisor =
+          this->current_temperature_scale_ == 0.0f ? 1.0f : this->current_temperature_scale_;
+      // Temperatures are signed: 0xFFF6 is -1.0 C, not 6552.6.
+      this->current_temperature = (float) (int16_t) current_raw / divisor;
+    }
+  }
+
   this->publish_state();
 }
 
