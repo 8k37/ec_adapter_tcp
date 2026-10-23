@@ -289,6 +289,16 @@ void EcAdapterTcpClimate::setup() {
   float stored = 0.0f;
   bool have_setpoint = this->pref_.load(&stored);
   if (have_setpoint) {
+    // Older builds could persist a setpoint read back from the write-only
+    // 0x0031 cache, which another entity may have filled with a differently
+    // scaled value (e.g. 45). Reject anything outside the configured range
+    // instead of publishing it, and fall back to the initial setpoint.
+    if (stored < this->min_temperature_ - 0.01f || stored > this->max_temperature_ + 0.01f) {
+      ESP_LOGW(TAG, "Stored setpoint %.2f is outside %.1f..%.1f, using %.1f", stored,
+               this->min_temperature_, this->max_temperature_, this->initial_target_temperature_);
+      stored = this->initial_target_temperature_;
+      have_setpoint = false;
+    }
     this->target_temperature = stored;
   } else {
     this->target_temperature = this->initial_target_temperature_;
@@ -490,11 +500,13 @@ void EcAdapterTcpClimate::on_registers_updated() {
   // The work-mode register is write-only and `mode` is the user's command,
   // persisted in flash: it is never derived from the register cache here,
   // otherwise the thermostat's own writes would flip the climate on and off.
-  uint16_t target_raw = 0;
-  if (this->hub_->read_register(this->temperature_address_, &target_raw)) {
-    float divisor = this->temperature_scale_ == 0.0f ? 1.0f : this->temperature_scale_;
-    this->target_temperature = (float) target_raw / divisor;
-  }
+  //
+  // The setpoint register 0x0031 is write-only as well, so its cache only ever
+  // holds a value *we* wrote. Reading it back was actively harmful: any other
+  // entity writing the same register with a different scale (e.g. a number
+  // with scale 10 setting 45 -> raw 450) made the climate publish 45.0 as its
+  // target, far outside min/max. The setpoint stays local: set by control(),
+  // persisted in flash and restored in setup().
 
   // Current temperature: an external source (e.g. a Home Assistant sensor) has
   // priority; the adapter's own readable register is only used when no source
@@ -556,14 +568,18 @@ void EcAdapterTcpClimate::control(const climate::ClimateCall &call) {
       value = this->min_temperature_;
     if (value > this->max_temperature_)
       value = this->max_temperature_;
+    // The setpoint is local: store and publish it even when the adapter is
+    // unreachable, so the UI never silently keeps an old value. The write is
+    // queued and retried by the hub.
+    this->target_temperature = value;
+    this->pref_.save(&value);
+    changed = true;
     if (this->hub_ != nullptr) {
       float multiplier = this->temperature_scale_ == 0.0f ? 1.0f : this->temperature_scale_;
       uint16_t raw = (uint16_t) lroundf(value * multiplier);
-      if (this->hub_->write_register(this->temperature_address_, raw)) {
-        this->target_temperature = value;
-        this->pref_.save(&value);
-        changed = true;
-      }
+      if (!this->hub_->write_register(this->temperature_address_, raw))
+        ESP_LOGW(TAG, "Could not queue setpoint 0x%04X = %u", this->temperature_address_,
+                 (unsigned) raw);
     }
   }
 
