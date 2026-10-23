@@ -28,7 +28,16 @@ void EcAdapterTcp::dump_config() {
   ESP_LOGCONFIG(TAG, "  Port: %u", (unsigned) this->port_);
   ESP_LOGCONFIG(TAG, "  Unit ID: %u", (unsigned) this->unit_id_);
   ESP_LOGCONFIG(TAG, "  Response timeout: %u ms", (unsigned) this->timeout_ms_);
-  ESP_LOGCONFIG(TAG, "  Polled registers: %u", (unsigned) this->addresses_.size());
+
+  std::string addrs;
+  for (uint16_t address : this->addresses_) {
+    char item[8];
+    snprintf(item, sizeof(item), "0x%04X", address);
+    if (!addrs.empty())
+      addrs += ", ";
+    addrs += item;
+  }
+  ESP_LOGCONFIG(TAG, "  Polled registers (%u): %s", (unsigned) this->addresses_.size(), addrs.c_str());
 }
 
 void EcAdapterTcp::add_read_register(uint16_t address, uint8_t count) {
@@ -239,8 +248,11 @@ bool EcAdapterTcp::read_holding_(uint16_t start, uint16_t count, std::vector<uin
   std::vector<uint8_t> resp;
   if (!this->transact_(pdu, sizeof(pdu), resp))
     return false;
-  if (resp.size() < 2 || resp[1] != count * 2 || resp.size() < (size_t) (2 + count * 2))
+  if (resp.size() < 2 || resp[1] != count * 2 || resp.size() < (size_t) (2 + count * 2)) {
+    ESP_LOGW(TAG, "Malformed read response for 0x%04X (%u regs): byte count %u, payload %u", start,
+             (unsigned) count, resp.size() > 1 ? (unsigned) resp[1] : 0u, (unsigned) resp.size());
     return false;
+  }
 
   out.clear();
   out.reserve(count);
