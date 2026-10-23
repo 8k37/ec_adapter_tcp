@@ -26,6 +26,10 @@ void EcAdapterTcp::dump_config() {
   ESP_LOGCONFIG(TAG, "ectoControl adapter (Modbus TCP):");
   ESP_LOGCONFIG(TAG, "  Host: %s", this->host_.c_str());
   ESP_LOGCONFIG(TAG, "  Port: %u", (unsigned) this->port_);
+  if (this->host_ == "127.0.0.1" || this->host_ == "localhost") {
+    ESP_LOGW(TAG, "  Host is set to localhost: from an ESP that is the device itself, "
+                  "not the adapter. Use the adapter's LAN address instead.");
+  }
   ESP_LOGCONFIG(TAG, "  Unit ID: %u", (unsigned) this->unit_id_);
   ESP_LOGCONFIG(TAG, "  Response timeout: %u ms", (unsigned) this->timeout_ms_);
 
