@@ -87,6 +87,10 @@ class EcAdapterTcp : public PollingComponent {
   std::map<uint16_t, uint16_t> registers_;
   uint8_t last_exception_{0};
   std::set<uint16_t> warned_ranges_;
+  // Set once the server has proven it cannot handle FC06 (it resets the TCP
+  // connection or answers with an exception). All later writes then go out as
+  // FC16 directly, without the 1 s reconnect cooldown after the reset.
+  bool writes_use_fc16_{false};
 };
 
 }  // namespace ec_adapter_tcp

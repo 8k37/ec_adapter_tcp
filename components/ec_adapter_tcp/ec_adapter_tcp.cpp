@@ -66,6 +66,8 @@ void EcAdapterTcp::dump_config() {
     addrs += item;
   }
   ESP_LOGCONFIG(TAG, "  Polled registers (%u): %s", (unsigned) this->addresses_.size(), addrs.c_str());
+  ESP_LOGCONFIG(TAG, "  Write function code: %s",
+                this->writes_use_fc16_ ? "FC16 (FC06 is unsupported by this server)" : "auto");
 }
 
 void EcAdapterTcp::add_read_register(uint16_t address, uint8_t count) {
@@ -129,10 +131,13 @@ void EcAdapterTcp::fail_cycle_(const char *reason, bool peer_closed) {
     if (!front.use_fc16) {
       front.use_fc16 = true;
       front.pdu = build_write_pdu(front.address, front.value, true);
-      ESP_LOGD(TAG, "Write 0x%04X = %u retrying with FC16 after %s", front.address,
-               (unsigned) front.value, reason);
+      this->writes_use_fc16_ = true;
+      ESP_LOGW(TAG, "FC06 is not supported by this server (%s); using FC16 for writes from now on",
+               reason);
+      ESP_LOGD(TAG, "Write 0x%04X = %u retrying with FC16", front.address, (unsigned) front.value);
       return;
     }
+=======
     ESP_LOGE(TAG, "Write 0x%04X = %u failed: %s. Both FC06 and FC16 were rejected or got no reply -"
                   " check that the Modbus TCP server/bridge forwards write function codes to the RTU"
                   " adapter (many modbus_bridge builds support reads only by default).",
@@ -506,10 +511,12 @@ void EcAdapterTcp::finish_request_() {
     if (req.is_write) {
       if (!req.use_fc16) {
         // Many servers accept FC16 but reject FC06 (or close the connection
-        // on it). Fall back once.
+        // on it). Fall back once and remember the choice for later writes.
         this->queue_.front().use_fc16 = true;
         this->queue_.front().pdu = build_write_pdu(req.address, req.value, true);
-        ESP_LOGD(TAG, "FC06 rejected (exception 0x%02X), retrying 0x%04X with FC16", code, req.address);
+        this->writes_use_fc16_ = true;
+        ESP_LOGW(TAG, "FC06 rejected (exception 0x%02X); using FC16 for writes from now on", code);
+        ESP_LOGD(TAG, "Write 0x%04X = %u retrying with FC16", req.address, (unsigned) req.value);
         return;
       }
       ESP_LOGE(TAG, "Write 0x%04X = %u rejected (Modbus exception 0x%02X). The bridge/RTU adapter"
@@ -555,7 +562,9 @@ void EcAdapterTcp::finish_request_() {
     }
   } else if ((pdu[0] == 0x06 || pdu[0] == 0x10) && req.is_write) {
     this->registers_[req.address] = req.value;
-    ESP_LOGI(TAG, "Write 0x%04X = %u applied", req.address, (unsigned) req.value);
+    if (req.use_fc16)
+      this->writes_use_fc16_ = true;
+    ESP_LOGI(TAG, "Write 0x%04X = %u applied (FC%02X)", req.address, (unsigned) req.value, pdu[0]);
     ok = true;
   } else {
     ESP_LOGW(TAG, "Unexpected function 0x%02X in response to 0x%04X", pdu[0], req.address);
@@ -587,8 +596,8 @@ bool EcAdapterTcp::write_register(uint16_t address, uint16_t value) {
   req.value = value;
   req.count = 0;
   req.retries = 1;
-  req.use_fc16 = false;
-  req.pdu = build_write_pdu(address, value, false);
+  req.use_fc16 = this->writes_use_fc16_;
+  req.pdu = build_write_pdu(address, value, req.use_fc16);
   // Writes are user commands and must not wait behind a full polling cycle.
   // While state_ != IDLE, queue_.front() is the in-flight request, so insert
   // right after it and before any pending reads. Insertion time between
