@@ -220,6 +220,29 @@ bool EcAdapterTcp::read_holding_(uint16_t start, uint16_t count, std::vector<uin
   return true;
 }
 
+bool EcAdapterTcp::poll_range_(uint16_t start, uint16_t count) {
+  std::vector<uint16_t> values;
+  if (!this->read_holding_(start, count, values)) {
+    if (this->last_exception_ == 0)
+      this->warned_ranges_.erase(start);
+    return false;
+  }
+  this->warned_ranges_.erase(start);
+  for (size_t i = 0; i < values.size(); i++)
+    this->registers_[(uint16_t) (start + i)] = values[i];
+  return true;
+}
+
+void EcAdapterTcp::log_missing_register_(uint16_t address) {
+  if (this->warned_ranges_.insert(address).second) {
+    ESP_LOGW(TAG, "Register 0x%04X is not available (Modbus exception 0x%02X), skipping", address,
+             this->last_exception_);
+  } else {
+    ESP_LOGV(TAG, "Register 0x%04X still unavailable (exception 0x%02X)", address,
+             this->last_exception_);
+  }
+}
+
 bool EcAdapterTcp::write_register(uint16_t address, uint16_t value) {
   uint8_t pdu[5];
   pdu[0] = 0x06;
@@ -271,29 +294,31 @@ void EcAdapterTcp::update() {
     ranges.emplace_back(start, (uint16_t) (prev - start + 1));
 
   for (auto &range : ranges) {
-    std::vector<uint16_t> values;
-    if (!this->read_holding_(range.first, range.second, values)) {
-      if (this->last_exception_ != 0) {
-        // The adapter answered, it just does not expose this register. The TCP
-        // stream is still in sync, so keep polling the remaining ranges instead
-        // of failing the whole update cycle.
-        if (this->warned_ranges_.insert(range.first).second) {
-          ESP_LOGW(TAG, "Register 0x%04X is not available (Modbus exception 0x%02X), skipping",
-                   range.first, this->last_exception_);
-        } else {
-          ESP_LOGV(TAG, "Register 0x%04X still unavailable (exception 0x%02X)", range.first,
-                   this->last_exception_);
-        }
-        continue;
-      }
+    if (this->poll_range_(range.first, range.second))
+      continue;
+    if (this->last_exception_ == 0) {
       // Transport level failure: the connection is in an unknown state.
       this->close_connection_();
       ESP_LOGW(TAG, "Read of 0x%04X (%u regs) failed", range.first, (unsigned) range.second);
       return;
     }
-    this->warned_ranges_.erase(range.first);
-    for (size_t i = 0; i < values.size(); i++)
-      this->registers_[(uint16_t) (range.first + i)] = values[i];
+    // The adapter answered with a Modbus exception. Split the range so a single
+    // unsupported register does not hide the valid ones around it.
+    if (range.second == 1) {
+      this->log_missing_register_(range.first);
+      continue;
+    }
+    for (uint16_t i = 0; i < range.second; i++) {
+      uint16_t addr = (uint16_t) (range.first + i);
+      if (this->poll_range_(addr, 1))
+        continue;
+      if (this->last_exception_ == 0) {
+        this->close_connection_();
+        ESP_LOGW(TAG, "Read of 0x%04X failed", addr);
+        return;
+      }
+      this->log_missing_register_(addr);
+    }
   }
 
   for (auto *listener : this->listeners_)
