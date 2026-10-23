@@ -233,8 +233,28 @@ void EcAdapterTcpClimate::add_temperature_source(const std::string &name, sensor
   uint8_t index = (uint8_t) this->sources_.size();
   this->sources_.emplace_back(name, source);
   this->source_values_.push_back(NAN);
-  if (source != nullptr)
-    source->add_on_state_callback([this, index](float value) { this->on_source_value_(index, value); });
+
+  if (source == nullptr) {
+    ESP_LOGW(TAG, "Temperature source '%s' has no sensor", name.c_str());
+    return;
+  }
+
+  source->add_on_state_callback([this, index](float value) { this->on_source_value_(index, value); });
+
+  // The sensor may already hold a value (restored from flash or delivered by
+  // the API before setup()): add_on_state_callback() only fires on the *next*
+  // publish, so without this the climate would stay without a current
+  // temperature until the sensor happens to update again.
+  if (source->has_state() && !std::isnan(source->state)) {
+    this->source_values_[index] = source->state;
+    ESP_LOGD(TAG, "Temperature source '%s' seeded with %.1f", name.c_str(), source->state);
+  }
+}
+
+void EcAdapterTcpClimate::set_current_temperature_sensor(sensor::Sensor *source) {
+  this->add_temperature_source("current", source);
+  this->explicit_source_ = (int8_t) (this->sources_.size() - 1);
+  this->active_source_ = (uint8_t) this->explicit_source_;
 }
 
 void EcAdapterTcpClimate::setup() {
@@ -272,8 +292,22 @@ void EcAdapterTcpClimate::setup() {
   this->source_pref_ =
       global_preferences->make_preference<uint8_t>(this->get_object_id_hash() ^ 0x5A5A5A5Au);
   uint8_t stored_source = 0;
-  if (this->source_pref_.load(&stored_source) && stored_source < this->sources_.size())
+  if (this->explicit_source_ >= 0) {
+    // current_temperature_sensor: wins over any stored selection.
+    this->active_source_ = (uint8_t) this->explicit_source_;
+  } else if (this->source_pref_.load(&stored_source) && stored_source < this->sources_.size()) {
     this->active_source_ = stored_source;
+  }
+  if (this->active_source_ >= this->sources_.size())
+    this->active_source_ = 0;
+
+  // Take the already known value of the active source right away, so the
+  // climate never sits on a NaN current temperature when a value exists.
+  if (this->active_source_ < this->source_values_.size()) {
+    float value = this->source_values_[this->active_source_];
+    if (!std::isnan(value))
+      this->current_temperature = value;
+  }
 
   this->mode = climate::CLIMATE_MODE_OFF;
   this->publish_state();
@@ -315,8 +349,17 @@ void EcAdapterTcpClimate::on_source_value_(uint8_t index, float value) {
   if (index >= this->source_values_.size())
     return;
   this->source_values_[index] = value;
-  if (index != this->active_source_ || std::isnan(value))
+  if (index != this->active_source_)
     return;
+  if (std::isnan(value)) {
+    // The source went unavailable; keep the last known value rather than
+    // dropping the current temperature from the UI.
+    ESP_LOGD(TAG, "Active temperature source '%s' is unavailable, keeping %.1f",
+             this->sources_[index].first.c_str(), this->current_temperature);
+    return;
+  }
+  ESP_LOGV(TAG, "Current temperature %.2f from source '%s'", value,
+           this->sources_[index].first.c_str());
   this->current_temperature = value;
   this->publish_state();
 }
@@ -327,12 +370,17 @@ void EcAdapterTcpClimate::dump_config() {
                 (unsigned) this->on_value_, (unsigned) this->off_value_);
   ESP_LOGCONFIG(TAG, "  Target temperature register: 0x%04X (scale x%.3f, write-only)",
                 this->temperature_address_, this->temperature_scale_);
-  if (this->current_temperature_address_ != 0) {
+  if (!this->sources_.empty()) {
+    ESP_LOGCONFIG(TAG, "  Current temperature: %u external source(s), active '%s'",
+                  (unsigned) this->sources_.size(),
+                  this->active_source_ < this->sources_.size()
+                      ? this->sources_[this->active_source_].first.c_str()
+                      : "?");
+  } else if (this->current_temperature_address_ != 0) {
     ESP_LOGCONFIG(TAG, "  Current temperature register: 0x%04X (scale x%.3f)",
                   this->current_temperature_address_, this->current_temperature_scale_);
   } else {
-    ESP_LOGCONFIG(TAG, "  Current temperature: external sources only (%u configured)",
-                  (unsigned) this->sources_.size());
+    ESP_LOGCONFIG(TAG, "  Current temperature: no source configured");
   }
   ESP_LOGCONFIG(TAG, "  Setpoint: local, initial %.1f, range %.1f..%.1f step %.1f",
                 this->initial_target_temperature_, this->min_temperature_, this->max_temperature_, this->step_);
@@ -365,11 +413,17 @@ void EcAdapterTcpClimate::on_registers_updated() {
     this->target_temperature = (float) target_raw / divisor;
   }
 
-  // Current temperature: fed by an external source (on_source_value_) when at
-  // least one is configured, otherwise read from the adapter's own readable
-  // register. Without either, current_temperature stays NaN and Home Assistant
-  // shows no current temperature at all.
-  if (this->sources_.empty() && this->current_temperature_address_ != 0) {
+  // Current temperature: an external source (e.g. a Home Assistant sensor) has
+  // priority; the adapter's own readable register is only used when no source
+  // is configured. Without either, current_temperature stays NaN and Home
+  // Assistant shows no current temperature at all.
+  if (!this->sources_.empty()) {
+    if (this->active_source_ < this->source_values_.size()) {
+      float value = this->source_values_[this->active_source_];
+      if (!std::isnan(value))
+        this->current_temperature = value;
+    }
+  } else if (this->current_temperature_address_ != 0) {
     uint16_t current_raw = 0;
     if (this->hub_->read_register(this->current_temperature_address_, &current_raw)) {
       float divisor =

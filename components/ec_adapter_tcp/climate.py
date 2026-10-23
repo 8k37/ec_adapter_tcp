@@ -12,6 +12,7 @@ CONF_TEMPERATURE_ADDRESS = "temperature_address"
 CONF_TEMPERATURE_SCALE = "temperature_scale"
 CONF_CURRENT_TEMPERATURE_ADDRESS = "current_temperature_address"
 CONF_CURRENT_TEMPERATURE_SCALE = "current_temperature_scale"
+CONF_CURRENT_TEMPERATURE_SENSOR = "current_temperature_sensor"
 CONF_ON_VALUE = "on_value"
 CONF_OFF_VALUE = "off_value"
 CONF_MIN_TEMPERATURE = "min_temperature"
@@ -40,6 +41,10 @@ CONFIG_SCHEMA = climate.climate_schema(EcAdapterTcpClimate).extend(
         cv.Optional(CONF_TEMPERATURE_SCALE, default=10.0): cv.float_,
         cv.Optional(CONF_CURRENT_TEMPERATURE_ADDRESS): cv.hex_uint16_t,
         cv.Optional(CONF_CURRENT_TEMPERATURE_SCALE, default=1.0): cv.float_,
+        # Single external sensor (typically a Home Assistant temperature
+        # sensor) that provides the current temperature. Shorthand for one
+        # sources: entry pinned as the active source.
+        cv.Optional(CONF_CURRENT_TEMPERATURE_SENSOR): cv.use_id(sensor.Sensor),
         cv.Optional(CONF_ON_VALUE, default=0): cv.int_range(min=0, max=0xFFFF),
         cv.Optional(CONF_OFF_VALUE, default=1): cv.int_range(min=0, max=0xFFFF),
         cv.Optional(CONF_MIN_TEMPERATURE, default=5.0): cv.float_,
@@ -89,6 +94,10 @@ async def to_code(config):
         )
     )
     cg.add(var.set_initial_target_temperature(config[CONF_INITIAL_TARGET_TEMPERATURE]))
+
+    if CONF_CURRENT_TEMPERATURE_SENSOR in config:
+        sens = await cg.get_variable(config[CONF_CURRENT_TEMPERATURE_SENSOR])
+        cg.add(var.set_current_temperature_sensor(sens))
 
     for source in config[CONF_SOURCES]:
         sens = await cg.get_variable(source[CONF_SENSOR])

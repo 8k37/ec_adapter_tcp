@@ -164,6 +164,11 @@ class EcAdapterTcpClimate : public Component, public climate::Climate, public Ec
   // Register an external temperature source (e.g. a Home Assistant sensor).
   void add_temperature_source(const std::string &name, sensor::Sensor *source);
 
+  // Shortcut for the common case: one sensor (e.g. a Home Assistant
+  // temperature sensor) is the only current temperature source. It is added
+  // as a source and pinned as the active one, ignoring the stored selection.
+  void set_current_temperature_sensor(sensor::Sensor *source);
+
   // Switch the active temperature source by its name (used by the select).
   void set_active_source(const std::string &name);
 
@@ -195,6 +200,9 @@ class EcAdapterTcpClimate : public Component, public climate::Climate, public Ec
   std::vector<std::pair<std::string, sensor::Sensor *>> sources_;
   std::vector<float> source_values_;
   uint8_t active_source_{0};
+  // Index of the source pinned by set_current_temperature_sensor(), or -1 when
+  // the user relies on sources: plus the stored selection.
+  int8_t explicit_source_{-1};
 };
 
 }  // namespace ec_adapter_tcp
