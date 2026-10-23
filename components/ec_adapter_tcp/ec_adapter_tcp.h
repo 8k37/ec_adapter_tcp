@@ -41,7 +41,7 @@ class EcAdapterTcp : public PollingComponent {
   void add_restore_write(uint16_t address, uint16_t value) {
     this->restore_writes_[address] = value;
   }
-=======
+
 
   bool read_register(uint16_t address, uint16_t *value) const;
   bool write_register(uint16_t address, uint16_t value);
