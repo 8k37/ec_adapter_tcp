@@ -98,10 +98,29 @@ void EcAdapterTcp::fail_cycle_(const char *reason, bool peer_closed) {
   this->close_socket_();
   this->state_ = State::IDLE;
 
+  if (peer_closed) {
+    // The server actively dropped the connection. Give it time to clean up
+    // the old socket before reconnecting, otherwise the next connect is
+    // accepted but immediately reset again (the modbus_bridge on the same
+    // ESP needs to free the previous client slot first).
+    this->last_connect_attempt_ = millis();
+  }
+
   if (this->queue_.empty())
     return;
 
   Request &front = this->queue_.front();
+
+  // Log the exact request that failed so wire-level problems are visible.
+  if (front.is_write) {
+    ESP_LOGW(TAG, "Failed write 0x%04X = %u (FC%02X) after %s", front.address,
+             (unsigned) front.value, front.use_fc16 ? 0x10 : 0x06, reason);
+  } else {
+    ESP_LOGW(TAG, "Failed read 0x%04X (%u regs) after %s", front.address, (unsigned) front.count,
+             reason);
+  }
+  if (!front.pdu.empty())
+    log_hex_("Failed PDU", front.pdu.data(), front.pdu.size());
 
   if (front.is_write) {
     // Writes are user commands, never drop them on the first failure:
