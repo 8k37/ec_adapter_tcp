@@ -22,6 +22,16 @@ namespace ec_adapter_tcp {
 
 static const char *const TAG = "ec_adapter_tcp";
 
+static void log_hex_(const char *prefix, const uint8_t *data, size_t len) {
+  char buf[3 * 32 + 1];
+  size_t shown = len > 32 ? 32 : len;
+  size_t pos = 0;
+  for (size_t i = 0; i < shown && pos + 4 < sizeof(buf); i++)
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "%02X ", data[i]);
+  ESP_LOGV(TAG, "%s (%u bytes%s): %s", prefix, (unsigned) len,
+           len > 32 ? ", truncated" : "", buf);
+}
+
 static std::vector<uint8_t> build_write_pdu(uint16_t address, uint16_t value, bool use_fc16) {
   if (!use_fc16) {
     return {0x06, (uint8_t) (address >> 8), (uint8_t) (address & 0xFF), (uint8_t) (value >> 8),
@@ -303,19 +313,14 @@ void EcAdapterTcp::start_next_request_() {
   }
 
   if (this->sock_ < 0) {
+    uint32_t now = millis();
     if (this->last_connect_attempt_ != 0 &&
-        (uint32_t) (millis() - this->last_connect_attempt_) < 1000) {
-      // Do not hammer the network: fail this request quickly, the next cycle
-      // will try again.
-      this->fail_cycle_("connect throttled", false);
-      return;
-    }
-    this->last_connect_attempt_ = millis();
+        (uint32_t) (now - this->last_connect_attempt_) < 1000)
+      return;  // throttled, try again on the next loop iteration
+    this->last_connect_attempt_ = now;
     this->start_connect_();
-    if (this->sock_ < 0) {
-      this->fail_cycle_("cannot connect", false);
-      return;
-    }
+    if (this->sock_ < 0)
+      return;  // connect failed; wait out the throttle window
     if (this->state_ != State::IDLE)
       return;  // connection in progress, resume from loop()
   }
@@ -372,6 +377,7 @@ void EcAdapterTcp::send_step_() {
     this->tx_sent_ += (size_t) n;
   }
 
+  log_hex_("TX", this->tx_buf_.data(), this->tx_buf_.size());
   this->deadline_ = millis() + this->timeout_ms_;
   this->state_ = State::RECEIVING;
 }
@@ -405,6 +411,7 @@ void EcAdapterTcp::recv_step_() {
     return;
   }
 
+  log_hex_("RX", buf, (size_t) n);
   this->rx_buf_.insert(this->rx_buf_.end(), buf, buf + n);
 
   if (this->rx_expected_ == 0 && this->rx_buf_.size() >= 7) {
@@ -548,9 +555,16 @@ bool EcAdapterTcp::write_register(uint16_t address, uint16_t value) {
   req.retries = 1;
   req.use_fc16 = false;
   req.pdu = build_write_pdu(address, value, false);
-  // Writes are user commands: put them at the front of the queue so they run
-  // before any pending reads from the polling cycle.
-  this->queue_.insert(this->queue_.begin(), req);
+  // Writes are user commands and must not wait behind a full polling cycle.
+  // While state_ != IDLE, queue_.front() is the in-flight request, so insert
+  // right after it and before any pending reads. Insertion time between
+  // multiple writes is preserved.
+  size_t pos = (this->state_ == State::IDLE) ? 0 : 1;
+  while (pos < this->queue_.size() && this->queue_[pos].is_write)
+    pos++;
+  this->queue_.insert(this->queue_.begin() + pos, req);
+  ESP_LOGD(TAG, "Queued write 0x%04X = %u at position %u", address, (unsigned) value,
+           (unsigned) pos);
   return true;
 }
 
