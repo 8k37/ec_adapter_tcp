@@ -325,25 +325,45 @@ void EcAdapterTcp::update() {
   if (this->state_ != State::IDLE)
     return;  // previous cycle still in progress, retry at the next interval
 
-  // First cycle after boot: push the write-only registers whose value the
-  // entities restored from flash. They cannot be read back from the adapter,
-  // so without this the boiler would keep whatever state it had while the UI
-  // shows the stored value.
-  if (!this->restore_done_ && !this->restore_writes_.empty()) {
-    for (auto &entry : this->restore_writes_) {
-      Request req;
-      req.is_write = true;
-      req.address = entry.first;
-      req.value = entry.second;
-      req.retries = 3;
-      req.use_fc16 = this->writes_use_fc16_;
-      req.pdu = build_write_pdu(entry.first, entry.second, req.use_fc16);
-      this->queue_.insert(this->queue_.begin(), req);
-      ESP_LOGI(TAG, "Restoring write-only register 0x%04X = %u on first connect", entry.first,
-               (unsigned) entry.second);
+  // Push the write-only registers whose value the entities restored from flash.
+  // They cannot be read back, so without this the boiler would keep whatever
+  // state it had while the UI shows the stored value. An entry stays pending
+  // until the adapter acknowledges it: if the adapter is offline at boot the
+  // restore is retried on the following cycles instead of being lost.
+  if (!this->restore_writes_.empty()) {
+    bool write_pending = false;
+    for (auto &r : this->queue_)
+      if (r.is_write)
+        write_pending = true;
+
+    if (!write_pending) {
+      if (this->restore_attempts_ < 3) {
+        for (auto &entry : this->restore_writes_) {
+          Request req;
+          req.is_write = true;
+          req.address = entry.first;
+          req.value = entry.second;
+          req.retries = 3;
+          req.use_fc16 = this->writes_use_fc16_;
+          req.pdu = build_write_pdu(entry.first, entry.second, req.use_fc16);
+          this->queue_.insert(this->queue_.begin(), req);
+          if (this->restore_attempts_ == 0) {
+            ESP_LOGI(TAG, "Restoring write-only register 0x%04X = %u after boot", entry.first,
+                     (unsigned) entry.second);
+          } else {
+            ESP_LOGD(TAG, "Retrying restore of 0x%04X = %u (attempt %u)", entry.first,
+                     (unsigned) entry.second, (unsigned) this->restore_attempts_ + 1);
+          }
+        }
+        this->restore_attempts_++;
+      } else {
+        for (auto &entry : this->restore_writes_)
+          ESP_LOGW(TAG, "Could not restore write-only register 0x%04X = %u: adapter did not"
+                        " acknowledge it; state may differ from Home Assistant",
+                   entry.first, (unsigned) entry.second);
+        this->restore_writes_.clear();
+      }
     }
-    this->restore_writes_.clear();
-    this->restore_done_ = true;
   }
 
   if (this->addresses_.empty())
@@ -636,6 +656,9 @@ void EcAdapterTcp::finish_request_() {
     if (req.use_fc16)
       this->writes_use_fc16_ = true;
     ESP_LOGI(TAG, "Write 0x%04X = %u applied (FC%02X)", req.address, (unsigned) req.value, pdu[0]);
+    // The adapter now holds this value, so it no longer needs restoring.
+    if (this->restore_writes_.erase(req.address) > 0)
+      ESP_LOGD(TAG, "Restored 0x%04X = %u", req.address, (unsigned) req.value);
     ok = true;
   } else {
     ESP_LOGW(TAG, "Unexpected function 0x%02X in response to 0x%04X", pdu[0], req.address);

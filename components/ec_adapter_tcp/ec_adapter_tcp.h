@@ -105,9 +105,11 @@ class EcAdapterTcp : public PollingComponent {
   std::map<uint16_t, uint16_t> registers_;
   uint8_t last_exception_{0};
   std::set<uint16_t> warned_ranges_;
-  // address -> value pushed once on the first cycle after boot (write-only regs).
+  // address -> value that must be pushed to the adapter after boot (write-only
+  // regs). An entry is removed only once the adapter acknowledged the write, so
+  // a dead adapter at boot does not silently lose the restore.
   std::map<uint16_t, uint16_t> restore_writes_;
-  bool restore_done_{false};
+  uint8_t restore_attempts_{0};
   // Set once the server has proven it cannot handle FC06 (it resets the TCP
   // connection or answers with an exception). All later writes then go out as
   // FC16 directly, without the 1 s reconnect cooldown after the reset.
