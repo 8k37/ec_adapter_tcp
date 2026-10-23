@@ -143,10 +143,15 @@ bool EcAdapterTcp::send_all_(const uint8_t *data, size_t len) {
     if (n < 0) {
       if (errno == EINTR)
         continue;
+      if (errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN)
+        this->last_peer_closed_ = true;
+      ESP_LOGW(TAG, "send() failed: %d", errno);
       return false;
     }
-    if (n == 0)
+    if (n == 0) {
+      this->last_peer_closed_ = true;
       return false;
+    }
     sent += (size_t) n;
   }
   return true;
@@ -159,30 +164,45 @@ bool EcAdapterTcp::recv_exact_(uint8_t *data, size_t len) {
     if (n < 0) {
       if (errno == EINTR)
         continue;
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        ESP_LOGW(TAG, "No response from %s:%u within %u ms (%u of %u bytes received)",
+                 this->host_.c_str(), (unsigned) this->port_, (unsigned) this->timeout_ms_,
+                 (unsigned) got, (unsigned) len);
+      } else if (errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN) {
+        this->last_peer_closed_ = true;
+      } else {
+        ESP_LOGW(TAG, "recv() failed: %d", errno);
+      }
       return false;
     }
-    if (n == 0)
+    if (n == 0) {
+      this->last_peer_closed_ = true;
       return false;
+    }
     got += (size_t) n;
   }
   return true;
 }
 
 bool EcAdapterTcp::transact_(const uint8_t *pdu, size_t pdu_len, std::vector<uint8_t> &response) {
-  // The adapter silently drops idle TCP connections. The stale socket still
-  // looks fine (sock_ >= 0) until the first recv() returns 0, which used to
-  // surface as a bogus "Read of 0x.... failed". Retry once on a fresh socket.
+  // Retry once on a fresh socket, but ONLY when the previous socket was
+  // actually closed by the peer (stale idle connection). A genuine timeout
+  // means the server accepted the connection but does not answer Modbus
+  // requests; retrying would just block the main loop for another full
+  // timeout window without any chance of success.
   for (int attempt = 0; attempt < 2; attempt++) {
     this->last_exception_ = 0;
+    this->last_peer_closed_ = false;
     if (!this->ensure_connected_())
       return false;
     if (this->transact_once_(pdu, pdu_len, response))
       return true;
     if (this->last_exception_ != 0)
-      return false;  // the adapter answered properly, retrying will not help
+      return false;  // the adapter answered with an exception, retrying will not help
+    if (!this->last_peer_closed_)
+      return false;  // genuine timeout, fail this poll and try again next cycle
     this->close_connection_();
-    if (attempt == 0)
-      ESP_LOGD(TAG, "Connection lost, reconnecting");
+    ESP_LOGD(TAG, "Connection closed by peer, reconnecting");
   }
   return false;
 }
@@ -294,7 +314,6 @@ bool EcAdapterTcp::write_register(uint16_t address, uint16_t value) {
 
   std::vector<uint8_t> resp;
   if (!this->transact_(pdu, sizeof(pdu), resp)) {
-    this->close_connection_();
     ESP_LOGW(TAG, "Write 0x%04X = %u failed", address, (unsigned) value);
     return false;
   }

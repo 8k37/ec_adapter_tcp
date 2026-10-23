@@ -59,6 +59,7 @@ class EcAdapterTcp : public PollingComponent {
   std::set<uint16_t> addresses_;
   std::map<uint16_t, uint16_t> registers_;
   uint8_t last_exception_{0};
+  bool last_peer_closed_{false};
   std::set<uint16_t> warned_ranges_;
 };
 
