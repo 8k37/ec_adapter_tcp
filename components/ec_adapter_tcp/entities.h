@@ -160,6 +160,12 @@ class EcAdapterTcpClimate : public Component, public climate::Climate, public Ec
     this->step_ = step;
   }
   void set_initial_target_temperature(float value) { this->initial_target_temperature_ = value; }
+  // Automatic mode: switch the work mode to on_value (adapter / heating) while
+  // the current temperature is below the target temperature and back to
+  // off_value (boiler panel / off) once the target plus the hysteresis has been
+  // reached. Off by default: the mode is then fully manual.
+  void set_auto_mode(bool auto_mode) { this->auto_mode_ = auto_mode; }
+  void set_auto_mode_hysteresis(float hysteresis) { this->auto_mode_hysteresis_ = hysteresis; }
 
   // Register an external temperature source (e.g. a Home Assistant sensor).
   void add_temperature_source(const std::string &name, sensor::Sensor *source);
@@ -180,6 +186,10 @@ class EcAdapterTcpClimate : public Component, public climate::Climate, public Ec
 
  protected:
   void on_source_value_(uint8_t index, float value);
+  // Compare the current temperature with the target and switch the work mode
+  // register when auto_mode_ is enabled and both values are known. Returns true
+  // when the mode was changed (and the register written).
+  bool maybe_apply_auto_mode_();
 
   EcAdapterTcp *hub_{nullptr};
   uint16_t address_{0x0030};
@@ -193,6 +203,8 @@ class EcAdapterTcpClimate : public Component, public climate::Climate, public Ec
   float max_temperature_{30.0f};
   float step_{0.5f};
   float initial_target_temperature_{20.0f};
+  bool auto_mode_{false};
+  float auto_mode_hysteresis_{0.3f};
   ESPPreferenceObject pref_;
   ESPPreferenceObject mode_pref_;
   ESPPreferenceObject source_pref_;

@@ -345,6 +345,37 @@ void EcAdapterTcpClimate::set_active_source(const std::string &name) {
   ESP_LOGW(TAG, "Unknown temperature source '%s'", name.c_str());
 }
 
+bool EcAdapterTcpClimate::maybe_apply_auto_mode_() {
+  if (!this->auto_mode_ || this->hub_ == nullptr)
+    return false;
+  if (std::isnan(this->current_temperature) || std::isnan(this->target_temperature))
+    return false;
+
+  // Thermostat with a dead band: start heating below the setpoint, stop only
+  // once the setpoint plus the hysteresis is reached. Anything in between keeps
+  // the current mode, so the adapter is not toggled on every poll.
+  climate::ClimateMode desired = this->mode;
+  if (this->current_temperature < this->target_temperature) {
+    desired = climate::CLIMATE_MODE_HEAT;
+  } else if (this->current_temperature >= this->target_temperature + this->auto_mode_hysteresis_) {
+    desired = climate::CLIMATE_MODE_OFF;
+  }
+  if (desired == this->mode)
+    return false;
+
+  uint16_t value = (desired == climate::CLIMATE_MODE_HEAT) ? this->on_value_ : this->off_value_;
+  if (!this->hub_->write_register(this->address_, value))
+    return false;
+
+  this->mode = desired;
+  uint8_t mode_byte = (uint8_t) this->mode;
+  this->mode_pref_.save(&mode_byte);
+  ESP_LOGI(TAG, "Auto mode: current %.1f, target %.1f -> %s", this->current_temperature,
+           this->target_temperature,
+           desired == climate::CLIMATE_MODE_HEAT ? "adapter (heat)" : "boiler panel (off)");
+  return true;
+}
+
 void EcAdapterTcpClimate::on_source_value_(uint8_t index, float value) {
   if (index >= this->source_values_.size())
     return;
@@ -361,6 +392,7 @@ void EcAdapterTcpClimate::on_source_value_(uint8_t index, float value) {
   ESP_LOGV(TAG, "Current temperature %.2f from source '%s'", value,
            this->sources_[index].first.c_str());
   this->current_temperature = value;
+  this->maybe_apply_auto_mode_();
   this->publish_state();
 }
 
@@ -384,6 +416,8 @@ void EcAdapterTcpClimate::dump_config() {
   }
   ESP_LOGCONFIG(TAG, "  Setpoint: local, initial %.1f, range %.1f..%.1f step %.1f",
                 this->initial_target_temperature_, this->min_temperature_, this->max_temperature_, this->step_);
+  if (this->auto_mode_)
+    ESP_LOGCONFIG(TAG, "  Auto mode: on, hysteresis %.1f", this->auto_mode_hysteresis_);
 }
 
 climate::ClimateTraits EcAdapterTcpClimate::traits() {
@@ -433,6 +467,8 @@ void EcAdapterTcpClimate::on_registers_updated() {
       this->current_temperature = (float) (int16_t) current_raw / divisor;
     }
   }
+
+  this->maybe_apply_auto_mode_();
 
   this->publish_state();
 }

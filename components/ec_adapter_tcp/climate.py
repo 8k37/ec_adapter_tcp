@@ -19,6 +19,8 @@ CONF_MIN_TEMPERATURE = "min_temperature"
 CONF_MAX_TEMPERATURE = "max_temperature"
 CONF_STEP = "step"
 CONF_INITIAL_TARGET_TEMPERATURE = "initial_target_temperature"
+CONF_AUTO_MODE = "auto_mode"
+CONF_AUTO_MODE_HYSTERESIS = "auto_mode_hysteresis"
 CONF_SOURCES = "sources"
 CONF_NAME = "name"
 CONF_SENSOR = "sensor"
@@ -51,6 +53,11 @@ CONFIG_SCHEMA = climate.climate_schema(EcAdapterTcpClimate).extend(
         cv.Optional(CONF_MAX_TEMPERATURE, default=30.0): cv.float_,
         cv.Optional(CONF_STEP, default=0.5): cv.float_,
         cv.Optional(CONF_INITIAL_TARGET_TEMPERATURE, default=20.0): cv.float_,
+        # Switch the work mode automatically: adapter (on_value) while the
+        # current temperature is below the target, boiler panel (off_value)
+        # once the target plus the hysteresis has been reached.
+        cv.Optional(CONF_AUTO_MODE, default=False): cv.boolean,
+        cv.Optional(CONF_AUTO_MODE_HYSTERESIS, default=0.3): cv.float_range(min=0.0, max=10.0),
         cv.Optional(CONF_SOURCES, default=[]): cv.ensure_list(
             cv.Schema(
                 {
@@ -94,6 +101,8 @@ async def to_code(config):
         )
     )
     cg.add(var.set_initial_target_temperature(config[CONF_INITIAL_TARGET_TEMPERATURE]))
+    cg.add(var.set_auto_mode(config[CONF_AUTO_MODE]))
+    cg.add(var.set_auto_mode_hysteresis(config[CONF_AUTO_MODE_HYSTERESIS]))
 
     if CONF_CURRENT_TEMPERATURE_SENSOR in config:
         sens = await cg.get_variable(config[CONF_CURRENT_TEMPERATURE_SENSOR])

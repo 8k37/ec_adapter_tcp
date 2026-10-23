@@ -25,3 +25,21 @@ Three options, in order of precedence:
 
 A configured source (either form) always takes precedence over
 `current_temperature_address`.
+## Automatic mode switch
+
+By default the work mode is fully manual: `climate` only writes the adapter's
+work-mode register when Home Assistant asks for a mode change.
+
+With `auto_mode: true` the component acts as a thermostat and switches the
+register itself:
+
+- current temperature **below** the target temperature → `on_value`
+  (adapter / heating);
+- current temperature **at or above** the target temperature plus
+  `auto_mode_hysteresis` (default `0.3`) → `off_value` (boiler panel / off).
+
+Inside the dead band the current mode is kept, so the adapter is not toggled on
+every poll. The switch needs a known current temperature, i.e. one of the
+sources described above (an external sensor is the reliable choice: the
+write-only work-mode register cannot be read back). A manual mode change from
+Home Assistant is overwritten on the next update while `auto_mode` is enabled.
