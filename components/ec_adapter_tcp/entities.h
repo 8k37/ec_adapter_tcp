@@ -90,6 +90,9 @@ class EcAdapterTcpNumber : public Component, public number::Number, public EcAda
   float min_value_{0.0f};
   float max_value_{100.0f};
   float step_{1.0f};
+  // Last value written, persisted in flash: the register is write-only, so it
+  // cannot be read back after a reboot.
+  ESPPreferenceObject pref_;
 };
 
 class EcAdapterTcpSelect : public Component, public select::Select, public EcAdapterTcpListener {
@@ -179,6 +182,7 @@ class EcAdapterTcpClimate : public Component, public climate::Climate, public Ec
   float step_{0.5f};
   float initial_target_temperature_{20.0f};
   ESPPreferenceObject pref_;
+  ESPPreferenceObject mode_pref_;
   ESPPreferenceObject source_pref_;
 
   std::vector<std::pair<std::string, sensor::Sensor *>> sources_;

@@ -111,6 +111,15 @@ void EcAdapterTcpNumber::setup() {
   // and would clobber the value we just wrote. The official HA integration
   // (sokolovs/ec-adapter) never polls them either. State is optimistic: the
   // hub caches the value it wrote once the adapter acknowledges the write.
+  // The last written value is persisted in flash and pushed back to the
+  // adapter once after boot, because it cannot be read from it.
+  this->pref_ = global_preferences->make_preference<uint16_t>(this->get_object_id_hash() ^ 0x9E3779B9u);
+  uint16_t stored = 0;
+  if (!this->pref_.load(&stored))
+    return;
+  float divisor = this->scale_ == 0.0f ? 1.0f : this->scale_;
+  this->publish_state((float) stored / divisor);
+  this->hub_->add_restore_write(this->address_, stored);
 }
 
 void EcAdapterTcpNumber::dump_config() {
@@ -136,6 +145,7 @@ void EcAdapterTcpNumber::control(float value) {
   if (!this->hub_->write_register(this->address_, raw))
     return;
   this->publish_state(value);
+  this->pref_.save(&raw);
 }
 
 // ---------------------------------------------------------------- select
@@ -154,6 +164,7 @@ void EcAdapterTcpSelect::setup() {
     for (auto &option : this->options_) {
       if (option.second == stored) {
         this->publish_state(option.first);
+        this->hub_->add_restore_write(this->address_, stored);
         return;
       }
     }
@@ -162,6 +173,7 @@ void EcAdapterTcpSelect::setup() {
     for (auto &option : this->options_) {
       if (option.first == this->initial_option_) {
         this->publish_state(option.first);
+        this->hub_->add_restore_write(this->address_, option.second);
         return;
       }
     }
@@ -237,11 +249,18 @@ void EcAdapterTcpClimate::setup() {
   // The setpoint is a local (virtual) room temperature; persist it across reboots.
   this->pref_ = global_preferences->make_preference<float>(this->get_object_id_hash());
   float stored = 0.0f;
-  if (this->pref_.load(&stored)) {
+  bool have_setpoint = this->pref_.load(&stored);
+  if (have_setpoint) {
     this->target_temperature = stored;
   } else {
     this->target_temperature = this->initial_target_temperature_;
   }
+
+  // Work mode is write-only too: persist the last commanded mode.
+  this->mode_pref_ =
+      global_preferences->make_preference<uint8_t>(this->get_object_id_hash() ^ 0x1F123BB5u);
+  uint8_t stored_mode = 0;
+  bool have_mode = this->mode_pref_.load(&stored_mode);
 
   // Remember which external temperature source the user picked.
   this->source_pref_ =
@@ -252,6 +271,23 @@ void EcAdapterTcpClimate::setup() {
 
   this->mode = climate::CLIMATE_MODE_OFF;
   this->publish_state();
+
+  // Push the last known values back to the adapter on the first cycle after
+  // boot: these registers are write-only, so the adapter would otherwise keep
+  // whatever it had while the UI shows the stored value. Only values that were
+  // actually set at least once are restored (never an implicit default).
+  if (this->hub_ != nullptr) {
+    if (have_setpoint) {
+      float multiplier = this->temperature_scale_ == 0.0f ? 1.0f : this->temperature_scale_;
+      uint16_t raw = (uint16_t) lroundf(this->target_temperature * multiplier);
+      this->hub_->add_restore_write(this->temperature_address_, raw);
+    }
+    if (have_mode) {
+      uint16_t raw = (stored_mode == (uint8_t) climate::CLIMATE_MODE_HEAT) ? this->on_value_
+                                                                          : this->off_value_;
+      this->hub_->add_restore_write(this->address_, raw);
+    }
+  }
 }
 
 void EcAdapterTcpClimate::set_active_source(const std::string &name) {
@@ -327,6 +363,8 @@ void EcAdapterTcpClimate::control(const climate::ClimateCall &call) {
     uint16_t value = (mode == climate::CLIMATE_MODE_OFF) ? this->off_value_ : this->on_value_;
     if (this->hub_ == nullptr || this->hub_->write_register(this->address_, value)) {
       this->mode = (mode == climate::CLIMATE_MODE_OFF) ? climate::CLIMATE_MODE_OFF : climate::CLIMATE_MODE_HEAT;
+      uint8_t mode_byte = (uint8_t) this->mode;
+      this->mode_pref_.save(&mode_byte);
       changed = true;
     }
   }

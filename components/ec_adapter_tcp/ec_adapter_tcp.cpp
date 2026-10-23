@@ -322,10 +322,32 @@ void EcAdapterTcp::enqueue_reads_() {
 }
 
 void EcAdapterTcp::update() {
-  if (this->addresses_.empty())
-    return;
   if (this->state_ != State::IDLE)
     return;  // previous cycle still in progress, retry at the next interval
+
+  // First cycle after boot: push the write-only registers whose value the
+  // entities restored from flash. They cannot be read back from the adapter,
+  // so without this the boiler would keep whatever state it had while the UI
+  // shows the stored value.
+  if (!this->restore_done_ && !this->restore_writes_.empty()) {
+    for (auto &entry : this->restore_writes_) {
+      Request req;
+      req.is_write = true;
+      req.address = entry.first;
+      req.value = entry.second;
+      req.retries = 3;
+      req.use_fc16 = this->writes_use_fc16_;
+      req.pdu = build_write_pdu(entry.first, entry.second, req.use_fc16);
+      this->queue_.insert(this->queue_.begin(), req);
+      ESP_LOGI(TAG, "Restoring write-only register 0x%04X = %u on first connect", entry.first,
+               (unsigned) entry.second);
+    }
+    this->restore_writes_.clear();
+    this->restore_done_ = true;
+  }
+
+  if (this->addresses_.empty())
+    return;
   for (auto &r : this->queue_) {
     if (!r.is_write)
       return;  // reads are already queued

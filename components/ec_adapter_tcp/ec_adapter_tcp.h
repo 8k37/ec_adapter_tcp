@@ -34,6 +34,14 @@ class EcAdapterTcp : public PollingComponent {
 
   void add_listener(EcAdapterTcpListener *listener) { this->listeners_.push_back(listener); }
   void add_read_register(uint16_t address, uint8_t count);
+  // Write-only registers (REG_W_*) cannot be read back, so after a reboot the
+  // adapter keeps whatever state it had. Entities that know their last value
+  // (from flash) register it here; the hub writes it once on the first poll
+  // cycle after boot.
+  void add_restore_write(uint16_t address, uint16_t value) {
+    this->restore_writes_[address] = value;
+  }
+=======
 
   bool read_register(uint16_t address, uint16_t *value) const;
   bool write_register(uint16_t address, uint16_t value);
@@ -97,6 +105,9 @@ class EcAdapterTcp : public PollingComponent {
   std::map<uint16_t, uint16_t> registers_;
   uint8_t last_exception_{0};
   std::set<uint16_t> warned_ranges_;
+  // address -> value pushed once on the first cycle after boot (write-only regs).
+  std::map<uint16_t, uint16_t> restore_writes_;
+  bool restore_done_{false};
   // Set once the server has proven it cannot handle FC06 (it resets the TCP
   // connection or answers with an exception). All later writes then go out as
   // FC16 directly, without the 1 s reconnect cooldown after the reset.
