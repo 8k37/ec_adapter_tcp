@@ -4,6 +4,9 @@ from esphome.const import CONF_ID
 
 CODEOWNERS = ["@8k37"]
 DEPENDENCIES = ["network"]
+# entities.h includes the headers of all entity types unconditionally, so every
+# one of them must be part of the build even when the YAML only uses a subset.
+AUTO_LOAD = ["binary_sensor", "button", "climate", "number", "select", "sensor"]
 MULTI_CONF = True
 
 # Local constants: CONF_HOST / CONF_PORT are not exposed by esphome.const in 2026.10.
