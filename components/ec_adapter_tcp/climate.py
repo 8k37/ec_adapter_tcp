@@ -27,7 +27,11 @@ EcAdapterTcpClimate = ec_adapter_tcp_ns.class_(
 CONFIG_SCHEMA = climate.climate_schema(EcAdapterTcpClimate).extend(
     {
         cv.GenerateID(CONF_EC_ADAPTER_TCP_ID): cv.use_id(EcAdapterTcp),
-        # Work mode register (0x0039: 0=disabled, 1=heating, 2=dwh, 3=heating+dwh).
+        # Work mode register (0x0039): 0=disabled, 1=heating_only, 2=dwh_only,
+        # 3=heating_dwh, 4=second_only, 5=heating_second. The value read back is
+        # not always meaningful (many adapters are write-only here), so the
+        # climate entity only trusts a readback of 0..5 and otherwise keeps the
+        # state it set after a successful write.
         cv.Optional(CONF_ADDRESS, default=0x0039): cv.hex_uint16_t,
         # Coolant setpoint register, scaled by 10 (0x0031).
         cv.Optional(CONF_TEMPERATURE_ADDRESS, default=0x0031): cv.hex_uint16_t,

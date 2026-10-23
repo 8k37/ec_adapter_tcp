@@ -274,8 +274,13 @@ void EcAdapterTcpClimate::on_registers_updated() {
   if (this->hub_ == nullptr)
     return;
 
+  // 0x0039 (work mode) is write-only on many ectoControl adapters: the value
+  // read back is unrelated to the actual mode (e.g. 40 = coolant setpoint).
+  // Accept the readback only when it is a valid work-mode code (0..5);
+  // otherwise keep the optimistic state set by control() so a successful write
+  // does not flip back to OFF on the next poll.
   uint16_t raw = 0;
-  if (this->hub_->read_register(this->address_, &raw))
+  if (this->hub_->read_register(this->address_, &raw) && raw <= 5)
     this->mode = (raw == this->on_value_) ? climate::CLIMATE_MODE_HEAT : climate::CLIMATE_MODE_OFF;
 
   uint16_t target_raw = 0;
