@@ -14,6 +14,7 @@ CONF_HOST = "host"
 CONF_PORT = "port"
 CONF_UNIT_ID = "unit_id"
 CONF_RESPONSE_TIMEOUT = "response_timeout"
+CONF_PERSISTENT_CONNECTION = "persistent_connection"
 CONF_EC_ADAPTER_TCP_ID = "ec_adapter_tcp_id"
 
 ec_adapter_tcp_ns = cg.esphome_ns.namespace("ec_adapter_tcp")
@@ -26,6 +27,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_PORT, default=502): cv.port,
         cv.Optional(CONF_UNIT_ID, default=1): cv.int_range(min=1, max=247),
         cv.Optional(CONF_RESPONSE_TIMEOUT, default="2s"): cv.positive_time_period_milliseconds,
+        cv.Optional(CONF_PERSISTENT_CONNECTION, default=False): cv.boolean,
     }
 ).extend(cv.polling_component_schema("15s"))
 
@@ -37,3 +39,4 @@ async def to_code(config):
     cg.add(var.set_port(config[CONF_PORT]))
     cg.add(var.set_unit_id(config[CONF_UNIT_ID]))
     cg.add(var.set_response_timeout(config[CONF_RESPONSE_TIMEOUT].total_milliseconds))
+    cg.add(var.set_persistent_connection(config[CONF_PERSISTENT_CONNECTION]))

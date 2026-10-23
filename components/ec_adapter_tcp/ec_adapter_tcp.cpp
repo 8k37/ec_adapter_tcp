@@ -67,6 +67,8 @@ void EcAdapterTcp::dump_config() {
   ESP_LOGCONFIG(TAG, "  Polled registers (%u): %s", (unsigned) this->addresses_.size(), addrs.c_str());
   ESP_LOGCONFIG(TAG, "  Write function code: %s",
                 this->writes_use_fc16_ ? "FC16 (FC06 is unsupported by this server)" : "auto");
+  ESP_LOGCONFIG(TAG, "  Persistent connection: %s",
+                this->persistent_connection_ ? "yes" : "no (reconnect each cycle)");
 }
 
 void EcAdapterTcp::add_read_register(uint16_t address, uint8_t count) {
@@ -92,10 +94,17 @@ void EcAdapterTcp::close_socket_() {
   this->tx_sent_ = 0;
   this->rx_buf_.clear();
   this->rx_expected_ = 0;
+  this->socket_used_ = false;
+}
+
+void EcAdapterTcp::maybe_close_after_cycle_() {
+  if (this->persistent_connection_ || !this->queue_.empty() || this->sock_ < 0)
+    return;
+  ESP_LOGV(TAG, "Closing socket after cycle (persistent_connection=false)");
+  this->close_socket_();
 }
 
 void EcAdapterTcp::fail_cycle_(const char *reason, bool peer_closed) {
-  ESP_LOGW(TAG, "Modbus cycle aborted: %s%s", reason, peer_closed ? " (peer closed)" : "");
   this->close_socket_();
   this->state_ = State::IDLE;
 
@@ -108,10 +117,22 @@ void EcAdapterTcp::fail_cycle_(const char *reason, bool peer_closed) {
     return;
 
   Request &front = this->queue_.front();
+  // A peer-closed read that still has retries left is routine recovery (the
+  // bridge dropped an idle socket); log it at DEBUG, not WARNING.
+  const bool routine_read_retry = !front.is_write && peer_closed && front.retries > 0;
+
+  if (routine_read_retry) {
+    ESP_LOGD(TAG, "Modbus cycle aborted: %s (peer closed), read will retry", reason);
+  } else {
+    ESP_LOGW(TAG, "Modbus cycle aborted: %s%s", reason, peer_closed ? " (peer closed)" : "");
+  }
 
   if (front.is_write) {
     ESP_LOGW(TAG, "Failed write 0x%04X = %u (FC%02X) after %s", front.address,
              (unsigned) front.value, front.use_fc16 ? 0x10 : 0x06, reason);
+  } else if (routine_read_retry) {
+    ESP_LOGD(TAG, "Failed read 0x%04X (%u regs) after %s (will retry)", front.address,
+             (unsigned) front.count, reason);
   } else {
     ESP_LOGW(TAG, "Failed read 0x%04X (%u regs) after %s", front.address, (unsigned) front.count,
              reason);
@@ -338,6 +359,15 @@ void EcAdapterTcp::start_next_request_() {
     return;
   }
 
+  // The bridge resets writes on a socket that has already carried traffic.
+  // Force a fresh connection for every write so the ack comes back reliably.
+  if (this->queue_.front().is_write && this->sock_ >= 0 && this->socket_used_) {
+    ESP_LOGD(TAG, "Reconnecting before write to get a fresh socket");
+    this->close_socket_();
+    this->last_connect_attempt_ = 0;
+    return;
+  }
+
   if (this->sock_ < 0) {
     uint32_t now = millis();
     if (this->last_connect_attempt_ != 0 && (uint32_t) (now - this->last_connect_attempt_) < 1000)
@@ -485,6 +515,10 @@ void EcAdapterTcp::finish_request_() {
     return;
   }
 
+  // A valid MBAP header means the round-trip happened on this socket, so a
+  // subsequent write must not reuse it (see start_next_request_).
+  this->socket_used_ = true;
+
   std::vector<uint8_t> pdu(this->rx_buf_.begin() + 7, this->rx_buf_.begin() + this->rx_expected_);
 
   Request req = this->queue_.front();
@@ -542,6 +576,7 @@ void EcAdapterTcp::finish_request_() {
       this->queue_.erase(this->queue_.begin());
     }
 
+    this->maybe_close_after_cycle_();
     if (this->queue_.empty())
       for (auto *listener : this->listeners_)
         listener->on_registers_updated();
@@ -601,6 +636,7 @@ void EcAdapterTcp::finish_request_() {
 
   this->queue_.erase(this->queue_.begin());
 
+  this->maybe_close_after_cycle_();
   if (this->queue_.empty())
     for (auto *listener : this->listeners_)
       listener->on_registers_updated();

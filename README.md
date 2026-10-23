@@ -25,3 +25,26 @@ write. On boot `climate` restores its setpoint from flash, `select` and
 Consequence: a change made by another Modbus client (e.g. Home Assistant)
 will not be reflected in these entities until it is written again from this
 device. Polling them is pointless — the adapter would always answer `0`.
+## Connection lifecycle
+
+Two connection modes:
+
+- **`persistent_connection: false` (default)** — the socket is closed after
+  each successful poll cycle and reopened on the next one. One TCP handshake
+  per `update_interval` (≈1 ms on a LAN), in exchange for immunity against
+  bridges that drop idle connections (e.g. `modbus_bridge` with
+  `send_wait_time`). Routine idle resets no longer appear in the log.
+- **`persistent_connection: true`** — the socket is kept open between cycles.
+  Use this only if the server never drops idle connections; otherwise every
+  cycle starts with `recv failed: 104` (ECONNRESET) and a 1 s reconnect
+  penalty.
+
+In both modes a **write is never sent on a socket that has already carried
+traffic**: if any request has completed on the current socket, it is closed
+and reopened before the write goes out. This bypasses the bridge bug that
+resets long-lived connections on the first write (FC06 or FC16 after several
+reads) and was the reason writes were previously retried with a 1 s delay.
+
+Reads that do hit a peer reset are still retried automatically; when
+`persistent_connection: false`, a peer-closed read retry is logged at DEBUG
+level, not WARNING.

@@ -30,6 +30,7 @@ class EcAdapterTcp : public PollingComponent {
   void set_port(uint16_t port) { this->port_ = port; }
   void set_unit_id(uint8_t unit_id) { this->unit_id_ = unit_id; }
   void set_response_timeout(uint32_t timeout_ms) { this->timeout_ms_ = timeout_ms; }
+  void set_persistent_connection(bool persistent) { this->persistent_connection_ = persistent; }
 
   void add_listener(EcAdapterTcpListener *listener) { this->listeners_.push_back(listener); }
   void add_read_register(uint16_t address, uint8_t count);
@@ -61,6 +62,7 @@ class EcAdapterTcp : public PollingComponent {
   void enqueue_reads_();
   void log_missing_register_(uint16_t address);
   void close_socket_();
+  void maybe_close_after_cycle_();
 
   std::string host_;
   uint16_t port_{502};
@@ -68,6 +70,14 @@ class EcAdapterTcp : public PollingComponent {
   uint32_t timeout_ms_{2000};
   int sock_{-1};
   bool connected_{false};
+  // When false (default) the socket is closed after each successful poll cycle
+  // and reopened on the next one; this avoids bridges that drop idle sockets
+  // and guarantees a fresh connection for any write. When true the socket is
+  // kept open between cycles.
+  bool persistent_connection_{false};
+  // True once at least one request/response round-trip has completed on the
+  // current socket. Used to force a fresh connection before a write.
+  bool socket_used_{false};
   uint16_t transaction_id_{0};
   uint16_t current_transaction_{0};
 
