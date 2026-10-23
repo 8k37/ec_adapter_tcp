@@ -345,6 +345,9 @@ void EcAdapterTcpClimate::set_active_source(const std::string &name) {
       this->source_pref_.save(&this->active_source_);
       if (!std::isnan(this->source_values_[i]))
         this->current_temperature = this->source_values_[i];
+      // Re-evaluate right away: switching to a source with a known value must
+      // not wait for the next poll to engage or release the adapter.
+      this->apply_auto_mode_();
       this->publish_state();
       ESP_LOGI(TAG, "Active temperature source: %s", name.c_str());
       return;
@@ -365,15 +368,23 @@ void EcAdapterTcpClimate::apply_auto_mode_() {
   }
   if (this->hub_ == nullptr)
     return;
-  if (std::isnan(this->current_temperature) || std::isnan(this->target_temperature)) {
-    this->action = climate::CLIMATE_ACTION_IDLE;
-    return;
-  }
 
   // The work-mode register is write-only, so the hub cache holds the value of
   // the last acknowledged write: use it to avoid rewriting the same value.
   uint16_t cached = 0;
   bool have_cached = this->hub_->read_register(this->address_, &cached);
+
+  if (std::isnan(this->current_temperature) || std::isnan(this->target_temperature)) {
+    // Fail safe: without a known temperature the thermostat cannot decide, so
+    // it must not leave the adapter heating. Hand the boiler back to its own
+    // panel and report idle until a temperature is available again. This also
+    // covers the boot case where the Home Assistant sensor has not published
+    // yet: the adapter is not engaged on stale information.
+    this->action = climate::CLIMATE_ACTION_IDLE;
+    if (!have_cached || cached != this->off_value_)
+      this->hub_->write_register(this->address_, this->off_value_);
+    return;
+  }
 
   // Below the setpoint the boiler is handed to the adapter (on_value). At or
   // above the setpoint plus the hysteresis it goes back to its own panel

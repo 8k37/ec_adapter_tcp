@@ -53,3 +53,4 @@ flicking back and forth.
 The thermostat needs a known current temperature, i.e. one of the sources
 described above (an external sensor is the reliable choice: the write-only
 work-mode register cannot be read back).
+## Reference `climate` configuration
