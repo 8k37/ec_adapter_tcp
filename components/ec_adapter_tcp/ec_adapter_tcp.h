@@ -46,7 +46,9 @@ class EcAdapterTcp : public PollingComponent {
     uint16_t address{0};
     uint16_t count{0};
     uint16_t value{0};
+    uint8_t retries{0};
     bool is_write{false};
+    bool use_fc16{false};
   };
 
   void start_connect_();
@@ -55,7 +57,7 @@ class EcAdapterTcp : public PollingComponent {
   void send_step_();
   void recv_step_();
   void finish_request_();
-  void fail_cycle_(const char *reason);
+  void fail_cycle_(const char *reason, bool peer_closed);
   void enqueue_reads_();
   void log_missing_register_(uint16_t address);
   void close_socket_();

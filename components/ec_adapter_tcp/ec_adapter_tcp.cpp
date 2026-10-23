@@ -22,6 +22,22 @@ namespace ec_adapter_tcp {
 
 static const char *const TAG = "ec_adapter_tcp";
 
+static std::vector<uint8_t> build_write_pdu(uint16_t address, uint16_t value, bool use_fc16) {
+  if (!use_fc16) {
+    return {0x06, (uint8_t) (address >> 8), (uint8_t) (address & 0xFF), (uint8_t) (value >> 8),
+            (uint8_t) (value & 0xFF)};
+  }
+  // FC16 (Write Multiple Registers), quantity 1. Widely supported even on
+  // servers that reject FC06.
+  return {0x10, (uint8_t) (address >> 8), (uint8_t) (address & 0xFF), 0x00, 0x01, 0x02,
+          (uint8_t) (value >> 8), (uint8_t) (value & 0xFF)};
+}
+
+static std::vector<uint8_t> build_read_pdu(uint16_t address, uint16_t count) {
+  return {0x03, (uint8_t) (address >> 8), (uint8_t) (address & 0xFF), (uint8_t) (count >> 8),
+          (uint8_t) (count & 0xFF)};
+}
+
 void EcAdapterTcp::setup() { this->transaction_id_ = 0; }
 
 void EcAdapterTcp::dump_config() {
@@ -67,11 +83,48 @@ void EcAdapterTcp::close_socket_() {
   this->rx_expected_ = 0;
 }
 
-void EcAdapterTcp::fail_cycle_(const char *reason) {
-  ESP_LOGW(TAG, "Modbus cycle aborted: %s", reason);
-  this->queue_.clear();
+void EcAdapterTcp::fail_cycle_(const char *reason, bool peer_closed) {
+  ESP_LOGW(TAG, "Modbus cycle aborted: %s%s", reason, peer_closed ? " (peer closed)" : "");
   this->close_socket_();
   this->state_ = State::IDLE;
+
+  if (this->queue_.empty())
+    return;
+
+  Request &front = this->queue_.front();
+
+  if (front.is_write) {
+    // Writes are user commands, never drop them on the first failure:
+    //  - if we haven't tried FC16 yet, fall back to it;
+    //  - otherwise log the failure and move on.
+    if (!front.use_fc16) {
+      front.use_fc16 = true;
+      front.pdu = build_write_pdu(front.address, front.value, true);
+      ESP_LOGD(TAG, "Write 0x%04X = %u retrying with FC16 after %s", front.address,
+               (unsigned) front.value, reason);
+      return;
+    }
+    ESP_LOGW(TAG, "Write 0x%04X = %u failed: %s", front.address, (unsigned) front.value, reason);
+    this->queue_.erase(this->queue_.begin());
+  } else {
+    // Reads: retry once on a peer-closed connection, drop on a timeout (the
+    // server is simply not answering, retrying would just waste another full
+    // timeout window).
+    if (peer_closed && front.retries > 0) {
+      front.retries--;
+      ESP_LOGD(TAG, "Read 0x%04X retrying after %s", front.address, reason);
+      return;
+    }
+    this->queue_.erase(this->queue_.begin());
+  }
+
+  // Drop the remaining reads; next update() will queue them again. Keep
+  // pending writes so a failing poll never swallows a user command.
+  std::vector<Request> writes;
+  for (auto &r : this->queue_)
+    if (r.is_write)
+      writes.push_back(r);
+  this->queue_ = writes;
 }
 
 void EcAdapterTcp::start_connect_() {
@@ -148,6 +201,7 @@ void EcAdapterTcp::poll_connect_() {
       ESP_LOGW(TAG, "connect timeout to %s:%u", this->host_.c_str(), (unsigned) this->port_);
       this->close_socket_();
       this->state_ = State::IDLE;
+      this->fail_cycle_("connect timeout", false);
     }
     return;
   }
@@ -157,6 +211,7 @@ void EcAdapterTcp::poll_connect_() {
     ESP_LOGW(TAG, "select() failed: %d", errno);
     this->close_socket_();
     this->state_ = State::IDLE;
+    this->fail_cycle_("select failed", false);
     return;
   }
 
@@ -166,6 +221,7 @@ void EcAdapterTcp::poll_connect_() {
     ESP_LOGW(TAG, "connect failed: %d", so_error);
     this->close_socket_();
     this->state_ = State::IDLE;
+    this->fail_cycle_("connect failed", false);
     return;
   }
 
@@ -202,8 +258,8 @@ void EcAdapterTcp::enqueue_reads_() {
     Request req;
     req.address = range.first;
     req.count = range.second;
-    req.pdu = {0x03, (uint8_t) (range.first >> 8), (uint8_t) (range.first & 0xFF),
-               (uint8_t) (range.second >> 8), (uint8_t) (range.second & 0xFF)};
+    req.retries = 1;
+    req.pdu = build_read_pdu(req.address, req.count);
     this->queue_.push_back(req);
   }
 }
@@ -211,8 +267,12 @@ void EcAdapterTcp::enqueue_reads_() {
 void EcAdapterTcp::update() {
   if (this->addresses_.empty())
     return;
-  if (this->state_ != State::IDLE || !this->queue_.empty())
-    return;  // the previous cycle is still running
+  if (this->state_ != State::IDLE)
+    return;  // previous cycle still in progress, retry at the next interval
+  for (auto &r : this->queue_) {
+    if (!r.is_write)
+      return;  // reads are already queued
+  }
   this->enqueue_reads_();
 }
 
@@ -243,14 +303,17 @@ void EcAdapterTcp::start_next_request_() {
   }
 
   if (this->sock_ < 0) {
-    if (this->last_connect_attempt_ != 0 && millis() - this->last_connect_attempt_ < 1000) {
-      this->state_ = State::IDLE;
+    if (this->last_connect_attempt_ != 0 &&
+        (uint32_t) (millis() - this->last_connect_attempt_) < 1000) {
+      // Do not hammer the network: fail this request quickly, the next cycle
+      // will try again.
+      this->fail_cycle_("connect throttled", false);
       return;
     }
     this->last_connect_attempt_ = millis();
     this->start_connect_();
     if (this->sock_ < 0) {
-      this->fail_cycle_("cannot connect");
+      this->fail_cycle_("cannot connect", false);
       return;
     }
     if (this->state_ != State::IDLE)
@@ -280,7 +343,7 @@ void EcAdapterTcp::start_next_request_() {
 
 void EcAdapterTcp::send_step_() {
   if (this->sock_ < 0) {
-    this->fail_cycle_("socket closed");
+    this->fail_cycle_("socket closed", true);
     return;
   }
 
@@ -290,13 +353,20 @@ void EcAdapterTcp::send_step_() {
     if (n < 0) {
       if (errno == EINTR)
         continue;
-      if (errno == EAGAIN || errno == EWOULDBLOCK)
+      bool peer_closed = (errno == ECONNRESET || errno == ENOTCONN || errno == EPIPE);
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        if ((int32_t) (millis() - this->deadline_) >= 0) {
+          this->fail_cycle_("send timeout", false);
+          return;
+        }
         return;  // socket buffer full, continue in the next loop iteration
-      this->fail_cycle_("send failed");
+      }
+      ESP_LOGW(TAG, "send failed: %d", errno);
+      this->fail_cycle_("send failed", peer_closed);
       return;
     }
     if (n == 0) {
-      this->fail_cycle_("send returned 0");
+      this->fail_cycle_("send returned 0", true);
       return;
     }
     this->tx_sent_ += (size_t) n;
@@ -308,7 +378,7 @@ void EcAdapterTcp::send_step_() {
 
 void EcAdapterTcp::recv_step_() {
   if (this->sock_ < 0) {
-    this->fail_cycle_("socket closed");
+    this->fail_cycle_("socket closed", true);
     return;
   }
 
@@ -321,15 +391,17 @@ void EcAdapterTcp::recv_step_() {
       if ((int32_t) (millis() - this->deadline_) >= 0) {
         ESP_LOGW(TAG, "No response from %s:%u within %u ms (%u bytes received)", this->host_.c_str(),
                  (unsigned) this->port_, (unsigned) this->timeout_ms_, (unsigned) this->rx_buf_.size());
-        this->fail_cycle_("timeout");
+        this->fail_cycle_("timeout", false);
       }
       return;
     }
-    this->fail_cycle_("recv failed");
+    bool peer_closed = (errno == ECONNRESET || errno == ENOTCONN || errno == EPIPE);
+    ESP_LOGW(TAG, "recv failed: %d", errno);
+    this->fail_cycle_("recv failed", peer_closed);
     return;
   }
   if (n == 0) {
-    this->fail_cycle_("connection closed by peer");
+    this->fail_cycle_("connection closed by peer", true);
     return;
   }
 
@@ -338,7 +410,7 @@ void EcAdapterTcp::recv_step_() {
   if (this->rx_expected_ == 0 && this->rx_buf_.size() >= 7) {
     uint16_t rlen = (uint16_t) ((this->rx_buf_[4] << 8) | this->rx_buf_[5]);
     if (rlen < 2) {
-      this->fail_cycle_("malformed MBAP length");
+      this->fail_cycle_("malformed MBAP length", false);
       return;
     }
     this->rx_expected_ = (size_t) 6 + rlen;
@@ -367,26 +439,71 @@ void EcAdapterTcp::finish_request_() {
     ESP_LOGW(TAG, "Unexpected MBAP header (protocol %u, transaction %u/%u, unit %u/%u)", r_protocol,
              (unsigned) r_transaction, (unsigned) this->current_transaction_, (unsigned) r_unit,
              (unsigned) this->unit_id_);
-    this->fail_cycle_("MBAP mismatch");
+    this->fail_cycle_("MBAP mismatch", false);
     return;
   }
 
   std::vector<uint8_t> pdu(this->rx_buf_.begin() + 7, this->rx_buf_.begin() + this->rx_expected_);
 
   Request req = this->queue_.front();
-  bool ok = false;
-  uint8_t exception = 0;
+
+  this->tx_buf_.clear();
+  this->tx_sent_ = 0;
+  this->rx_buf_.clear();
+  this->rx_expected_ = 0;
+  this->state_ = State::IDLE;
 
   if (pdu.empty()) {
-    this->fail_cycle_("empty response");
+    this->fail_cycle_("empty response", false);
     return;
   }
 
+  // Exception response: 0x80 | function code, then the exception code.
   if (pdu[0] & 0x80) {
-    exception = pdu.size() > 1 ? pdu[1] : 0xFF;
-    this->last_exception_ = exception;
-    ESP_LOGV(TAG, "Modbus exception 0x%02X for function 0x%02X", exception, pdu[0] & 0x7F);
-  } else if (pdu[0] == 0x03 && req.count > 0) {
+    uint8_t code = pdu.size() > 1 ? pdu[1] : 0xFF;
+    this->last_exception_ = code;
+    ESP_LOGV(TAG, "Modbus exception 0x%02X for function 0x%02X", code, pdu[0] & 0x7F);
+
+    if (req.is_write) {
+      if (!req.use_fc16) {
+        // Many servers accept FC16 but reject FC06 (or close the connection
+        // on it). Fall back once.
+        this->queue_.front().use_fc16 = true;
+        this->queue_.front().pdu = build_write_pdu(req.address, req.value, true);
+        ESP_LOGD(TAG, "FC06 rejected (exception 0x%02X), retrying 0x%04X with FC16", code, req.address);
+        return;
+      }
+      ESP_LOGW(TAG, "Write 0x%04X = %u rejected (Modbus exception 0x%02X)", req.address,
+               (unsigned) req.value, code);
+      this->queue_.erase(this->queue_.begin());
+    } else if (req.count > 1) {
+      // Split the range so one unsupported register does not hide the rest.
+      this->queue_.erase(this->queue_.begin());
+      std::vector<Request> singles;
+      singles.reserve(req.count);
+      for (uint16_t i = 0; i < req.count; i++) {
+        Request single;
+        single.address = (uint16_t) (req.address + i);
+        single.count = 1;
+        single.retries = 1;
+        single.pdu = build_read_pdu(single.address, 1);
+        singles.push_back(single);
+      }
+      this->queue_.insert(this->queue_.begin(), singles.begin(), singles.end());
+      return;
+    } else {
+      this->log_missing_register_(req.address);
+      this->queue_.erase(this->queue_.begin());
+    }
+
+    if (this->queue_.empty())
+      for (auto *listener : this->listeners_)
+        listener->on_registers_updated();
+    return;
+  }
+
+  bool ok = false;
+  if (pdu[0] == 0x03 && req.count > 0) {
     if (pdu.size() >= 2 && pdu[1] == req.count * 2 && pdu.size() >= (size_t) (2 + req.count * 2)) {
       for (uint16_t i = 0; i < req.count; i++)
         this->registers_[(uint16_t) (req.address + i)] =
@@ -396,40 +513,23 @@ void EcAdapterTcp::finish_request_() {
     } else {
       ESP_LOGW(TAG, "Malformed read response for 0x%04X (%u regs)", req.address, (unsigned) req.count);
     }
-  } else if (pdu[0] == 0x06 && req.is_write) {
+  } else if ((pdu[0] == 0x06 || pdu[0] == 0x10) && req.is_write) {
     this->registers_[req.address] = req.value;
+    ESP_LOGI(TAG, "Write 0x%04X = %u applied", req.address, (unsigned) req.value);
     ok = true;
   } else {
     ESP_LOGW(TAG, "Unexpected function 0x%02X in response to 0x%04X", pdu[0], req.address);
   }
 
-  this->tx_buf_.clear();
-  this->tx_sent_ = 0;
-  this->rx_buf_.clear();
-  this->rx_expected_ = 0;
-  this->state_ = State::IDLE;
-
-  if (!ok && exception != 0) {
-    if (!req.is_write && req.count > 1) {
-      // The adapter rejected the whole range. Split it into single-register
-      // reads so one unsupported register does not hide the valid ones.
-      this->queue_.erase(this->queue_.begin());
-      std::vector<Request> singles;
-      singles.reserve(req.count);
-      for (uint16_t i = 0; i < req.count; i++) {
-        Request single;
-        single.address = (uint16_t) (req.address + i);
-        single.count = 1;
-        single.pdu = {0x03, (uint8_t) (single.address >> 8), (uint8_t) (single.address & 0xFF), 0x00,
-                      0x01};
-        singles.push_back(single);
-      }
-      this->queue_.insert(this->queue_.begin(), singles.begin(), singles.end());
+  if (!ok) {
+    if (req.is_write && !req.use_fc16) {
+      this->queue_.front().use_fc16 = true;
+      this->queue_.front().pdu = build_write_pdu(req.address, req.value, true);
+      ESP_LOGD(TAG, "Unexpected write response, retrying 0x%04X with FC16", req.address);
       return;
     }
-    this->log_missing_register_(req.address);
-  } else if (!ok && req.is_write) {
-    ESP_LOGW(TAG, "Write 0x%04X = %u failed", req.address, (unsigned) req.value);
+    if (req.is_write)
+      ESP_LOGW(TAG, "Write 0x%04X = %u failed", req.address, (unsigned) req.value);
   }
 
   this->queue_.erase(this->queue_.begin());
@@ -444,9 +544,13 @@ bool EcAdapterTcp::write_register(uint16_t address, uint16_t value) {
   req.is_write = true;
   req.address = address;
   req.value = value;
-  req.pdu = {0x06, (uint8_t) (address >> 8), (uint8_t) (address & 0xFF), (uint8_t) (value >> 8),
-             (uint8_t) (value & 0xFF)};
-  this->queue_.push_back(req);
+  req.count = 0;
+  req.retries = 1;
+  req.use_fc16 = false;
+  req.pdu = build_write_pdu(address, value, false);
+  // Writes are user commands: put them at the front of the queue so they run
+  // before any pending reads from the polling cycle.
+  this->queue_.insert(this->queue_.begin(), req);
   return true;
 }
 
