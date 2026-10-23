@@ -124,9 +124,21 @@ void EcAdapterTcp::fail_cycle_(const char *reason, bool peer_closed) {
   if (!front.pdu.empty())
     log_hex_("Failed PDU", front.pdu.data(), front.pdu.size());
 
+      ESP_LOGD(TAG, "Write 0x%04X = %u retrying with FC16", front.address, (unsigned) front.value);
+      return;
+    }
+    ESP_LOGE(TAG, "Write 0x%04X = %u failed: %s. Both FC06 and FC16 were rejected or got no reply -"
+=======
+    ESP_LOGE(TAG, "Write 0x%04X = %u failed: %s. Both FC06 and FC16 were rejected or got no reply -"
+                  " check that the Modbus TCP server/bridge forwards write function codes to the RTU"
+                  " adapter (many modbus_bridge builds support reads only by default).",
+             front.address, (unsigned) front.value, reason);
+    this->queue_.erase(this->queue_.begin());
+=======
   if (front.is_write) {
     // Writes are user commands, never drop them on the first failure:
-    //  - if we haven't tried FC16 yet, fall back to it;
+    //  - if we haven't tried FC16 yet, fall back to it and remember the choice
+    //    so later writes skip FC06 entirely;
     //  - otherwise log the failure and move on.
     if (!front.use_fc16) {
       front.use_fc16 = true;
@@ -134,7 +146,14 @@ void EcAdapterTcp::fail_cycle_(const char *reason, bool peer_closed) {
       this->writes_use_fc16_ = true;
       ESP_LOGW(TAG, "FC06 is not supported by this server (%s); using FC16 for writes from now on",
                reason);
+      ESP_LOGD(TAG, "Write 0x%04X = %u retrying with FC16", front.address, (unsigned) front.value);
+      return;
+    }
     ESP_LOGE(TAG, "Write 0x%04X = %u failed: %s. Both FC06 and FC16 were rejected or got no reply -"
+                  " check that the Modbus TCP server/bridge forwards write function codes to the RTU"
+                  " adapter (many modbus_bridge builds support reads only by default).",
+             front.address, (unsigned) front.value, reason);
+    this->queue_.erase(this->queue_.begin());
 =======
       ESP_LOGD(TAG, "Write 0x%04X = %u retrying with FC16", front.address, (unsigned) front.value);
       return;
