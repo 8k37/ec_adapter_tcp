@@ -26,3 +26,9 @@ cycle after boot**:
   change the boiler state by itself).
 
 The log shows one line per restored register:
+
+### Restore retries
+
+Restore runs on the first poll cycle after boot. If the adapter is offline at
+that moment the value is not lost: the pending writes stay queued and are
+retried on the next cycles (up to 3 rounds). After that a warning is logged
