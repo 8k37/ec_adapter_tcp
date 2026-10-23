@@ -1,5 +1,6 @@
 #include "ec_adapter_tcp.h"
 
+#include <arpa/inet.h>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -13,7 +14,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#include "esphome/components/network/util.h"
+#include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
 namespace esphome {
@@ -27,10 +28,6 @@ void EcAdapterTcp::dump_config() {
   ESP_LOGCONFIG(TAG, "ectoControl adapter (Modbus TCP):");
   ESP_LOGCONFIG(TAG, "  Host: %s", this->host_.c_str());
   ESP_LOGCONFIG(TAG, "  Port: %u", (unsigned) this->port_);
-  if (this->host_is_self_()) {
-    ESP_LOGE(TAG, "  Host points at this ESP itself, not at the adapter. "
-                  "Set host: to the adapter's LAN address.");
-  }
   ESP_LOGCONFIG(TAG, "  Unit ID: %u", (unsigned) this->unit_id_);
   ESP_LOGCONFIG(TAG, "  Response timeout: %u ms", (unsigned) this->timeout_ms_);
 
@@ -58,298 +55,126 @@ bool EcAdapterTcp::read_register(uint16_t address, uint16_t *value) const {
   return true;
 }
 
-void EcAdapterTcp::close_connection_() {
+void EcAdapterTcp::close_socket_() {
   if (this->sock_ >= 0) {
     ::close(this->sock_);
     this->sock_ = -1;
   }
   this->connected_ = false;
+  this->tx_buf_.clear();
+  this->tx_sent_ = 0;
+  this->rx_buf_.clear();
+  this->rx_expected_ = 0;
 }
 
-bool EcAdapterTcp::host_is_self_() const {
-  if (this->host_ == "127.0.0.1" || this->host_ == "localhost")
-    return true;
-  // Compare against the address this ESP currently uses. get_use_address()
-  // returns an empty string while Wi-Fi is still coming up, in which case we
-  // simply skip the check instead of producing a false positive.
-  std::string own = network::get_use_address();
-  return !own.empty() && own == this->host_;
+void EcAdapterTcp::fail_cycle_(const char *reason) {
+  ESP_LOGW(TAG, "Modbus cycle aborted: %s", reason);
+  this->queue_.clear();
+  this->close_socket_();
+  this->state_ = State::IDLE;
 }
 
-bool EcAdapterTcp::ensure_connected_() {
-  if (this->sock_ >= 0)
-    return true;
+void EcAdapterTcp::start_connect_() {
+  this->close_socket_();
 
-  if (this->host_is_self_()) {
-    ESP_LOGE(TAG, "Refusing to connect to %s: that is this ESP's own address", this->host_.c_str());
-    return false;
-  }
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(this->port_);
 
-  struct addrinfo hints;
-  memset(&hints, 0, sizeof(hints));
-  hints.ai_family = AF_INET;
-  hints.ai_socktype = SOCK_STREAM;
+  if (inet_pton(AF_INET, this->host_.c_str(), &addr.sin_addr) != 1) {
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
 
-  char port_str[8];
-  snprintf(port_str, sizeof(port_str), "%u", (unsigned) this->port_);
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%u", (unsigned) this->port_);
 
-  struct addrinfo *res = nullptr;
-  int gai = getaddrinfo(this->host_.c_str(), port_str, &hints, &res);
-  if (gai != 0 || res == nullptr) {
-    ESP_LOGW(TAG, "Cannot resolve '%s'", this->host_.c_str());
-    return false;
+    struct addrinfo *res = nullptr;
+    if (getaddrinfo(this->host_.c_str(), port_str, &hints, &res) != 0 || res == nullptr) {
+      ESP_LOGW(TAG, "Cannot resolve '%s'", this->host_.c_str());
+      return;
+    }
+    memcpy(&addr, res->ai_addr, sizeof(addr));
+    freeaddrinfo(res);
   }
 
   int sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (sock < 0) {
-    freeaddrinfo(res);
     ESP_LOGW(TAG, "socket() failed: %d", errno);
-    return false;
+    return;
   }
 
   int flags = fcntl(sock, F_GETFL, 0);
   fcntl(sock, F_SETFL, flags | O_NONBLOCK);
 
-  int ret = ::connect(sock, res->ai_addr, res->ai_addrlen);
-  freeaddrinfo(res);
-  if (ret < 0 && errno != EINPROGRESS) {
-    ::close(sock);
-    ESP_LOGW(TAG, "connect() failed: %d", errno);
-    return false;
-  }
-
-  if (ret < 0) {
-    fd_set wfds;
-    FD_ZERO(&wfds);
-    FD_SET(sock, &wfds);
-    struct timeval tv;
-    tv.tv_sec = this->timeout_ms_ / 1000;
-    tv.tv_usec = (this->timeout_ms_ % 1000) * 1000;
-    int sel = ::select(sock + 1, nullptr, &wfds, nullptr, &tv);
-    if (sel <= 0) {
-      ::close(sock);
-      ESP_LOGW(TAG, "connect timeout to %s:%u", this->host_.c_str(), (unsigned) this->port_);
-      return false;
-    }
-    int so_error = 0;
-    socklen_t len = sizeof(so_error);
-    if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len) < 0 || so_error != 0) {
-      ::close(sock);
-      ESP_LOGW(TAG, "connect failed: %d", so_error);
-      return false;
-    }
-  }
-
-  fcntl(sock, F_SETFL, flags);
-
-  struct timeval tv;
-  tv.tv_sec = this->timeout_ms_ / 1000;
-  tv.tv_usec = (this->timeout_ms_ % 1000) * 1000;
-  setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-  setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
   int nodelay = 1;
   setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
+  int ret = ::connect(sock, (struct sockaddr *) &addr, sizeof(addr));
+  if (ret < 0 && errno != EINPROGRESS) {
+    ESP_LOGW(TAG, "connect() failed: %d", errno);
+    ::close(sock);
+    return;
+  }
+
   this->sock_ = sock;
-  this->connected_ = true;
-  ESP_LOGI(TAG, "Connected to %s:%u", this->host_.c_str(), (unsigned) this->port_);
-  return true;
-}
-
-bool EcAdapterTcp::send_all_(const uint8_t *data, size_t len) {
-  size_t sent = 0;
-  while (sent < len) {
-    ssize_t n = ::send(this->sock_, data + sent, len - sent, 0);
-    if (n < 0) {
-      if (errno == EINTR)
-        continue;
-      if (errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN)
-        this->last_peer_closed_ = true;
-      ESP_LOGW(TAG, "send() failed: %d", errno);
-      return false;
-    }
-    if (n == 0) {
-      this->last_peer_closed_ = true;
-      return false;
-    }
-    sent += (size_t) n;
-  }
-  return true;
-}
-
-bool EcAdapterTcp::recv_exact_(uint8_t *data, size_t len) {
-  size_t got = 0;
-  while (got < len) {
-    ssize_t n = ::recv(this->sock_, data + got, len - got, 0);
-    if (n < 0) {
-      if (errno == EINTR)
-        continue;
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        ESP_LOGW(TAG, "No response from %s:%u within %u ms (%u of %u bytes received)",
-                 this->host_.c_str(), (unsigned) this->port_, (unsigned) this->timeout_ms_,
-                 (unsigned) got, (unsigned) len);
-      } else if (errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN) {
-        this->last_peer_closed_ = true;
-      } else {
-        ESP_LOGW(TAG, "recv() failed: %d", errno);
-      }
-      return false;
-    }
-    if (n == 0) {
-      this->last_peer_closed_ = true;
-      return false;
-    }
-    got += (size_t) n;
-  }
-  return true;
-}
-
-bool EcAdapterTcp::transact_(const uint8_t *pdu, size_t pdu_len, std::vector<uint8_t> &response) {
-  // Retry once on a fresh socket, but ONLY when the previous socket was
-  // actually closed by the peer (stale idle connection). A genuine timeout
-  // means the server accepted the connection but does not answer Modbus
-  // requests; retrying would just block the main loop for another full
-  // timeout window without any chance of success.
-  for (int attempt = 0; attempt < 2; attempt++) {
-    this->last_exception_ = 0;
-    this->last_peer_closed_ = false;
-    if (!this->ensure_connected_())
-      return false;
-    if (this->transact_once_(pdu, pdu_len, response))
-      return true;
-    if (this->last_exception_ != 0)
-      return false;  // the adapter answered with an exception, retrying will not help
-    if (!this->last_peer_closed_)
-      return false;  // genuine timeout, fail this poll and try again next cycle
-    this->close_connection_();
-    ESP_LOGD(TAG, "Connection closed by peer, reconnecting");
-  }
-  return false;
-}
-
-bool EcAdapterTcp::transact_once_(const uint8_t *pdu, size_t pdu_len, std::vector<uint8_t> &response) {
-  this->transaction_id_++;
-
-  uint8_t header[7];
-  header[0] = (uint8_t) (this->transaction_id_ >> 8);
-  header[1] = (uint8_t) (this->transaction_id_ & 0xFF);
-  header[2] = 0x00;
-  header[3] = 0x00;
-  uint16_t len = (uint16_t) (pdu_len + 1);
-  header[4] = (uint8_t) (len >> 8);
-  header[5] = (uint8_t) (len & 0xFF);
-  header[6] = this->unit_id_;
-
-  if (!this->send_all_(header, sizeof(header)) || !this->send_all_(pdu, pdu_len))
-    return false;
-
-  uint8_t rheader[7];
-  if (!this->recv_exact_(rheader, sizeof(rheader)))
-    return false;
-
-  uint16_t r_transaction = (uint16_t) ((rheader[0] << 8) | rheader[1]);
-  uint16_t r_protocol = (uint16_t) ((rheader[2] << 8) | rheader[3]);
-  uint16_t rlen = (uint16_t) ((rheader[4] << 8) | rheader[5]);
-  if (r_protocol != 0 || rlen < 2) {
-    ESP_LOGW(TAG, "Malformed MBAP header (protocol %u, length %u)", r_protocol, rlen);
-    return false;
-  }
-  if (r_transaction != this->transaction_id_) {
-    ESP_LOGW(TAG, "Transaction id mismatch (sent %u, got %u)", (unsigned) this->transaction_id_,
-             (unsigned) r_transaction);
-    return false;
-  }
-  if (rheader[6] != this->unit_id_) {
-    ESP_LOGW(TAG, "Unit id mismatch (sent %u, got %u)", (unsigned) this->unit_id_,
-             (unsigned) rheader[6]);
-    return false;
-  }
-
-  response.resize(rlen - 1);
-  if (!this->recv_exact_(response.data(), response.size()))
-    return false;
-
-  if (response[0] & 0x80) {
-    this->last_exception_ = response.size() > 1 ? response[1] : 0xFF;
-    ESP_LOGD(TAG, "Modbus exception 0x%02X for function 0x%02X", this->last_exception_, pdu[0]);
-    return false;
-  }
-  return true;
-}
-
-bool EcAdapterTcp::read_holding_(uint16_t start, uint16_t count, std::vector<uint16_t> &out) {
-  uint8_t pdu[5];
-  pdu[0] = 0x03;
-  pdu[1] = (uint8_t) (start >> 8);
-  pdu[2] = (uint8_t) (start & 0xFF);
-  pdu[3] = (uint8_t) (count >> 8);
-  pdu[4] = (uint8_t) (count & 0xFF);
-
-  std::vector<uint8_t> resp;
-  if (!this->transact_(pdu, sizeof(pdu), resp))
-    return false;
-  if (resp.size() < 2 || resp[1] != count * 2 || resp.size() < (size_t) (2 + count * 2)) {
-    ESP_LOGW(TAG, "Malformed read response for 0x%04X (%u regs): byte count %u, payload %u", start,
-             (unsigned) count, resp.size() > 1 ? (unsigned) resp[1] : 0u, (unsigned) resp.size());
-    return false;
-  }
-
-  out.clear();
-  out.reserve(count);
-  for (uint16_t i = 0; i < count; i++)
-    out.push_back((uint16_t) ((resp[2 + i * 2] << 8) | resp[3 + i * 2]));
-  return true;
-}
-
-bool EcAdapterTcp::poll_range_(uint16_t start, uint16_t count) {
-  std::vector<uint16_t> values;
-  if (!this->read_holding_(start, count, values)) {
-    if (this->last_exception_ == 0)
-      this->warned_ranges_.erase(start);
-    return false;
-  }
-  this->warned_ranges_.erase(start);
-  for (size_t i = 0; i < values.size(); i++)
-    this->registers_[(uint16_t) (start + i)] = values[i];
-  return true;
-}
-
-void EcAdapterTcp::log_missing_register_(uint16_t address) {
-  if (this->warned_ranges_.insert(address).second) {
-    ESP_LOGW(TAG, "Register 0x%04X is not available (Modbus exception 0x%02X), skipping", address,
-             this->last_exception_);
+  if (ret == 0) {
+    this->connected_ = true;
+    this->state_ = State::IDLE;
+    ESP_LOGI(TAG, "Connected to %s:%u", this->host_.c_str(), (unsigned) this->port_);
   } else {
-    ESP_LOGV(TAG, "Register 0x%04X still unavailable (exception 0x%02X)", address,
-             this->last_exception_);
+    this->state_ = State::CONNECTING;
+    this->deadline_ = millis() + this->timeout_ms_;
   }
 }
 
-bool EcAdapterTcp::write_register(uint16_t address, uint16_t value) {
-  uint8_t pdu[5];
-  pdu[0] = 0x06;
-  pdu[1] = (uint8_t) (address >> 8);
-  pdu[2] = (uint8_t) (address & 0xFF);
-  pdu[3] = (uint8_t) (value >> 8);
-  pdu[4] = (uint8_t) (value & 0xFF);
-
-  std::vector<uint8_t> resp;
-  if (!this->transact_(pdu, sizeof(pdu), resp)) {
-    ESP_LOGW(TAG, "Write 0x%04X = %u failed", address, (unsigned) value);
-    return false;
+void EcAdapterTcp::poll_connect_() {
+  if (this->sock_ < 0) {
+    this->state_ = State::IDLE;
+    return;
   }
-  this->registers_[address] = value;
-  return true;
+
+  fd_set wfds;
+  FD_ZERO(&wfds);
+  FD_SET(this->sock_, &wfds);
+  struct timeval tv;
+  tv.tv_sec = 0;
+  tv.tv_usec = 0;
+  int sel = ::select(this->sock_ + 1, nullptr, &wfds, nullptr, &tv);
+  if (sel == 0) {
+    if ((int32_t) (millis() - this->deadline_) >= 0) {
+      ESP_LOGW(TAG, "connect timeout to %s:%u", this->host_.c_str(), (unsigned) this->port_);
+      this->close_socket_();
+      this->state_ = State::IDLE;
+    }
+    return;
+  }
+  if (sel < 0) {
+    if (errno == EINTR)
+      return;
+    ESP_LOGW(TAG, "select() failed: %d", errno);
+    this->close_socket_();
+    this->state_ = State::IDLE;
+    return;
+  }
+
+  int so_error = 0;
+  socklen_t len = sizeof(so_error);
+  if (getsockopt(this->sock_, SOL_SOCKET, SO_ERROR, &so_error, &len) < 0 || so_error != 0) {
+    ESP_LOGW(TAG, "connect failed: %d", so_error);
+    this->close_socket_();
+    this->state_ = State::IDLE;
+    return;
+  }
+
+  this->connected_ = true;
+  this->state_ = State::IDLE;
+  ESP_LOGI(TAG, "Connected to %s:%u", this->host_.c_str(), (unsigned) this->port_);
 }
 
-void EcAdapterTcp::update() {
-  if (this->addresses_.empty())
-    return;
-
-  if (!this->ensure_connected_()) {
-    this->close_connection_();
-    return;
-  }
-
+void EcAdapterTcp::enqueue_reads_() {
   // Merge the requested addresses into contiguous ranges (max 120 registers per request).
   std::vector<std::pair<uint16_t, uint16_t>> ranges;
   uint16_t start = 0;
@@ -374,35 +199,255 @@ void EcAdapterTcp::update() {
     ranges.emplace_back(start, (uint16_t) (prev - start + 1));
 
   for (auto &range : ranges) {
-    if (this->poll_range_(range.first, range.second))
-      continue;
-    if (this->last_exception_ == 0) {
-      // Transport level failure: the connection is in an unknown state.
-      this->close_connection_();
-      ESP_LOGW(TAG, "Read of 0x%04X (%u regs) failed", range.first, (unsigned) range.second);
-      return;
-    }
-    // The adapter answered with a Modbus exception. Split the range so a single
-    // unsupported register does not hide the valid ones around it.
-    if (range.second == 1) {
-      this->log_missing_register_(range.first);
-      continue;
-    }
-    for (uint16_t i = 0; i < range.second; i++) {
-      uint16_t addr = (uint16_t) (range.first + i);
-      if (this->poll_range_(addr, 1))
-        continue;
-      if (this->last_exception_ == 0) {
-        this->close_connection_();
-        ESP_LOGW(TAG, "Read of 0x%04X failed", addr);
-        return;
-      }
-      this->log_missing_register_(addr);
-    }
+    Request req;
+    req.address = range.first;
+    req.count = range.second;
+    req.pdu = {0x03, (uint8_t) (range.first >> 8), (uint8_t) (range.first & 0xFF),
+               (uint8_t) (range.second >> 8), (uint8_t) (range.second & 0xFF)};
+    this->queue_.push_back(req);
+  }
+}
+
+void EcAdapterTcp::update() {
+  if (this->addresses_.empty())
+    return;
+  if (this->state_ != State::IDLE || !this->queue_.empty())
+    return;  // the previous cycle is still running
+  this->enqueue_reads_();
+}
+
+void EcAdapterTcp::loop() {
+  PollingComponent::loop();
+
+  switch (this->state_) {
+    case State::IDLE:
+      if (!this->queue_.empty())
+        this->start_next_request_();
+      break;
+    case State::CONNECTING:
+      this->poll_connect_();
+      break;
+    case State::SENDING:
+      this->send_step_();
+      break;
+    case State::RECEIVING:
+      this->recv_step_();
+      break;
+  }
+}
+
+void EcAdapterTcp::start_next_request_() {
+  if (this->queue_.empty()) {
+    this->state_ = State::IDLE;
+    return;
   }
 
-  for (auto *listener : this->listeners_)
-    listener->on_registers_updated();
+  if (this->sock_ < 0) {
+    if (this->last_connect_attempt_ != 0 && millis() - this->last_connect_attempt_ < 1000) {
+      this->state_ = State::IDLE;
+      return;
+    }
+    this->last_connect_attempt_ = millis();
+    this->start_connect_();
+    if (this->sock_ < 0) {
+      this->fail_cycle_("cannot connect");
+      return;
+    }
+    if (this->state_ != State::IDLE)
+      return;  // connection in progress, resume from loop()
+  }
+
+  const Request &req = this->queue_.front();
+  this->current_transaction_ = ++this->transaction_id_;
+  uint16_t len = (uint16_t) (req.pdu.size() + 1);
+
+  this->tx_buf_.clear();
+  this->tx_buf_.push_back((uint8_t) (this->current_transaction_ >> 8));
+  this->tx_buf_.push_back((uint8_t) (this->current_transaction_ & 0xFF));
+  this->tx_buf_.push_back(0x00);
+  this->tx_buf_.push_back(0x00);
+  this->tx_buf_.push_back((uint8_t) (len >> 8));
+  this->tx_buf_.push_back((uint8_t) (len & 0xFF));
+  this->tx_buf_.push_back(this->unit_id_);
+  this->tx_buf_.insert(this->tx_buf_.end(), req.pdu.begin(), req.pdu.end());
+
+  this->tx_sent_ = 0;
+  this->rx_buf_.clear();
+  this->rx_expected_ = 0;
+  this->deadline_ = millis() + this->timeout_ms_;
+  this->state_ = State::SENDING;
+}
+
+void EcAdapterTcp::send_step_() {
+  if (this->sock_ < 0) {
+    this->fail_cycle_("socket closed");
+    return;
+  }
+
+  while (this->tx_sent_ < this->tx_buf_.size()) {
+    ssize_t n = ::send(this->sock_, this->tx_buf_.data() + this->tx_sent_,
+                       this->tx_buf_.size() - this->tx_sent_, 0);
+    if (n < 0) {
+      if (errno == EINTR)
+        continue;
+      if (errno == EAGAIN || errno == EWOULDBLOCK)
+        return;  // socket buffer full, continue in the next loop iteration
+      this->fail_cycle_("send failed");
+      return;
+    }
+    if (n == 0) {
+      this->fail_cycle_("send returned 0");
+      return;
+    }
+    this->tx_sent_ += (size_t) n;
+  }
+
+  this->deadline_ = millis() + this->timeout_ms_;
+  this->state_ = State::RECEIVING;
+}
+
+void EcAdapterTcp::recv_step_() {
+  if (this->sock_ < 0) {
+    this->fail_cycle_("socket closed");
+    return;
+  }
+
+  uint8_t buf[64];
+  ssize_t n = ::recv(this->sock_, buf, sizeof(buf), 0);
+  if (n < 0) {
+    if (errno == EINTR)
+      return;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      if ((int32_t) (millis() - this->deadline_) >= 0) {
+        ESP_LOGW(TAG, "No response from %s:%u within %u ms (%u bytes received)", this->host_.c_str(),
+                 (unsigned) this->port_, (unsigned) this->timeout_ms_, (unsigned) this->rx_buf_.size());
+        this->fail_cycle_("timeout");
+      }
+      return;
+    }
+    this->fail_cycle_("recv failed");
+    return;
+  }
+  if (n == 0) {
+    this->fail_cycle_("connection closed by peer");
+    return;
+  }
+
+  this->rx_buf_.insert(this->rx_buf_.end(), buf, buf + n);
+
+  if (this->rx_expected_ == 0 && this->rx_buf_.size() >= 7) {
+    uint16_t rlen = (uint16_t) ((this->rx_buf_[4] << 8) | this->rx_buf_[5]);
+    if (rlen < 2) {
+      this->fail_cycle_("malformed MBAP length");
+      return;
+    }
+    this->rx_expected_ = (size_t) 6 + rlen;
+  }
+
+  if (this->rx_expected_ != 0 && this->rx_buf_.size() >= this->rx_expected_)
+    this->finish_request_();
+}
+
+void EcAdapterTcp::log_missing_register_(uint16_t address) {
+  if (this->warned_ranges_.insert(address).second) {
+    ESP_LOGW(TAG, "Register 0x%04X is not available (Modbus exception 0x%02X), skipping", address,
+             this->last_exception_);
+  } else {
+    ESP_LOGV(TAG, "Register 0x%04X still unavailable (exception 0x%02X)", address,
+             this->last_exception_);
+  }
+}
+
+void EcAdapterTcp::finish_request_() {
+  uint16_t r_transaction = (uint16_t) ((this->rx_buf_[0] << 8) | this->rx_buf_[1]);
+  uint16_t r_protocol = (uint16_t) ((this->rx_buf_[2] << 8) | this->rx_buf_[3]);
+  uint8_t r_unit = this->rx_buf_[6];
+
+  if (r_protocol != 0 || r_transaction != this->current_transaction_ || r_unit != this->unit_id_) {
+    ESP_LOGW(TAG, "Unexpected MBAP header (protocol %u, transaction %u/%u, unit %u/%u)", r_protocol,
+             (unsigned) r_transaction, (unsigned) this->current_transaction_, (unsigned) r_unit,
+             (unsigned) this->unit_id_);
+    this->fail_cycle_("MBAP mismatch");
+    return;
+  }
+
+  std::vector<uint8_t> pdu(this->rx_buf_.begin() + 7, this->rx_buf_.begin() + this->rx_expected_);
+
+  Request req = this->queue_.front();
+  bool ok = false;
+  uint8_t exception = 0;
+
+  if (pdu.empty()) {
+    this->fail_cycle_("empty response");
+    return;
+  }
+
+  if (pdu[0] & 0x80) {
+    exception = pdu.size() > 1 ? pdu[1] : 0xFF;
+    this->last_exception_ = exception;
+    ESP_LOGV(TAG, "Modbus exception 0x%02X for function 0x%02X", exception, pdu[0] & 0x7F);
+  } else if (pdu[0] == 0x03 && req.count > 0) {
+    if (pdu.size() >= 2 && pdu[1] == req.count * 2 && pdu.size() >= (size_t) (2 + req.count * 2)) {
+      for (uint16_t i = 0; i < req.count; i++)
+        this->registers_[(uint16_t) (req.address + i)] =
+            (uint16_t) ((pdu[2 + i * 2] << 8) | pdu[3 + i * 2]);
+      this->warned_ranges_.erase(req.address);
+      ok = true;
+    } else {
+      ESP_LOGW(TAG, "Malformed read response for 0x%04X (%u regs)", req.address, (unsigned) req.count);
+    }
+  } else if (pdu[0] == 0x06 && req.is_write) {
+    this->registers_[req.address] = req.value;
+    ok = true;
+  } else {
+    ESP_LOGW(TAG, "Unexpected function 0x%02X in response to 0x%04X", pdu[0], req.address);
+  }
+
+  this->tx_buf_.clear();
+  this->tx_sent_ = 0;
+  this->rx_buf_.clear();
+  this->rx_expected_ = 0;
+  this->state_ = State::IDLE;
+
+  if (!ok && exception != 0) {
+    if (!req.is_write && req.count > 1) {
+      // The adapter rejected the whole range. Split it into single-register
+      // reads so one unsupported register does not hide the valid ones.
+      this->queue_.erase(this->queue_.begin());
+      std::vector<Request> singles;
+      singles.reserve(req.count);
+      for (uint16_t i = 0; i < req.count; i++) {
+        Request single;
+        single.address = (uint16_t) (req.address + i);
+        single.count = 1;
+        single.pdu = {0x03, (uint8_t) (single.address >> 8), (uint8_t) (single.address & 0xFF), 0x00,
+                      0x01};
+        singles.push_back(single);
+      }
+      this->queue_.insert(this->queue_.begin(), singles.begin(), singles.end());
+      return;
+    }
+    this->log_missing_register_(req.address);
+  } else if (!ok && req.is_write) {
+    ESP_LOGW(TAG, "Write 0x%04X = %u failed", req.address, (unsigned) req.value);
+  }
+
+  this->queue_.erase(this->queue_.begin());
+
+  if (this->queue_.empty())
+    for (auto *listener : this->listeners_)
+      listener->on_registers_updated();
+}
+
+bool EcAdapterTcp::write_register(uint16_t address, uint16_t value) {
+  Request req;
+  req.is_write = true;
+  req.address = address;
+  req.value = value;
+  req.pdu = {0x06, (uint8_t) (address >> 8), (uint8_t) (address & 0xFF), (uint8_t) (value >> 8),
+             (uint8_t) (value & 0xFF)};
+  this->queue_.push_back(req);
+  return true;
 }
 
 }  // namespace ec_adapter_tcp

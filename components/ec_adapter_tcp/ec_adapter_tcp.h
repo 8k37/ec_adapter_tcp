@@ -21,6 +21,7 @@ class EcAdapterTcpListener {
 class EcAdapterTcp : public PollingComponent {
  public:
   void setup() override;
+  void loop() override;
   void update() override;
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::DATA; }
@@ -38,16 +39,26 @@ class EcAdapterTcp : public PollingComponent {
   bool is_connected() const { return this->connected_; }
 
  protected:
-  bool poll_range_(uint16_t start, uint16_t count);
+  enum class State : uint8_t { IDLE, CONNECTING, SENDING, RECEIVING };
+
+  struct Request {
+    std::vector<uint8_t> pdu;
+    uint16_t address{0};
+    uint16_t count{0};
+    uint16_t value{0};
+    bool is_write{false};
+  };
+
+  void start_connect_();
+  void poll_connect_();
+  void start_next_request_();
+  void send_step_();
+  void recv_step_();
+  void finish_request_();
+  void fail_cycle_(const char *reason);
+  void enqueue_reads_();
   void log_missing_register_(uint16_t address);
-  bool host_is_self_() const;
-  bool ensure_connected_();
-  void close_connection_();
-  bool transact_(const uint8_t *pdu, size_t pdu_len, std::vector<uint8_t> &response);
-  bool transact_once_(const uint8_t *pdu, size_t pdu_len, std::vector<uint8_t> &response);
-  bool read_holding_(uint16_t start, uint16_t count, std::vector<uint16_t> &out);
-  bool send_all_(const uint8_t *data, size_t len);
-  bool recv_exact_(uint8_t *data, size_t len);
+  void close_socket_();
 
   std::string host_;
   uint16_t port_{502};
@@ -56,11 +67,23 @@ class EcAdapterTcp : public PollingComponent {
   int sock_{-1};
   bool connected_{false};
   uint16_t transaction_id_{0};
+  uint16_t current_transaction_{0};
+
+  State state_{State::IDLE};
+  uint32_t deadline_{0};
+  uint32_t last_connect_attempt_{0};
+
+  std::vector<uint8_t> tx_buf_;
+  size_t tx_sent_{0};
+  std::vector<uint8_t> rx_buf_;
+  size_t rx_expected_{0};
+
+  std::vector<Request> queue_;
+
   std::vector<EcAdapterTcpListener *> listeners_;
   std::set<uint16_t> addresses_;
   std::map<uint16_t, uint16_t> registers_;
   uint8_t last_exception_{0};
-  bool last_peer_closed_{false};
   std::set<uint16_t> warned_ranges_;
 };
 
