@@ -122,17 +122,20 @@ void EcAdapterTcp::fail_cycle_(const char *reason, bool peer_closed) {
     log_hex_("Failed PDU", front.pdu.data(), front.pdu.size());
 
   if (front.is_write) {
-    // Writes are user commands, never drop them on the first failure:
-    //  - if we haven't tried FC16 yet, fall back to it and remember the choice
-    //    so later writes skip FC06 entirely;
-    //  - otherwise log the failure and move on.
-    if (!front.use_fc16) {
-      front.use_fc16 = true;
-      front.pdu = build_write_pdu(front.address, front.value, true);
-      this->writes_use_fc16_ = true;
-      ESP_LOGW(TAG, "FC06 is not supported by this server (%s); using FC16 for writes from now on",
-               reason);
-      ESP_LOGD(TAG, "Write 0x%04X = %u retrying with FC16", front.address, (unsigned) front.value);
+    // The bridge resets long-lived sockets on write, but accepts a write
+    // that arrives on a freshly opened connection. So on a peer reset we
+    // reconnect (the cooldown in start_next_request_ enforces that) and
+    // retry the same write. Upgrade to FC16 on the first retry.
+    if (peer_closed && front.retries > 0) {
+      front.retries--;
+      if (!front.use_fc16) {
+        front.use_fc16 = true;
+        front.pdu = build_write_pdu(front.address, front.value, true);
+        this->writes_use_fc16_ = true;
+        ESP_LOGW(TAG, "FC06 failed (%s); using FC16 for writes from now on", reason);
+      }
+      ESP_LOGI(TAG, "Write 0x%04X = %u will retry on a fresh connection (%u retries left)",
+               front.address, (unsigned) front.value, front.retries);
       return;
     }
     ESP_LOGE(TAG, "Write 0x%04X = %u failed: %s. Both FC06 and FC16 were rejected or got no reply -"
@@ -610,7 +613,9 @@ bool EcAdapterTcp::write_register(uint16_t address, uint16_t value) {
   req.address = address;
   req.value = value;
   req.count = 0;
-  req.retries = 1;
+  // Writes get extra attempts because modbus_bridge resets long-lived sockets
+  // on write and only accepts the write on a freshly opened connection.
+  req.retries = 3;
   req.use_fc16 = this->writes_use_fc16_;
   req.pdu = build_write_pdu(address, value, req.use_fc16);
   // Writes are user commands and must not wait behind a full polling cycle.
