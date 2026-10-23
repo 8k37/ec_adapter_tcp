@@ -40,6 +40,7 @@ class EcAdapterTcp : public PollingComponent {
  protected:
   bool poll_range_(uint16_t start, uint16_t count);
   void log_missing_register_(uint16_t address);
+  bool host_is_self_() const;
   bool ensure_connected_();
   void close_connection_();
   bool transact_(const uint8_t *pdu, size_t pdu_len, std::vector<uint8_t> &response);
