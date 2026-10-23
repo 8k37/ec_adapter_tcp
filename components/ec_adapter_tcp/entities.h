@@ -163,11 +163,11 @@ class EcAdapterTcpClimate : public Component, public climate::Climate, public Ec
   void on_source_value_(uint8_t index, float value);
 
   EcAdapterTcp *hub_{nullptr};
-  uint16_t address_{0x0039};
+  uint16_t address_{0x0030};
   uint16_t temperature_address_{0x0031};
   float temperature_scale_{10.0f};
-  uint16_t on_value_{1};
-  uint16_t off_value_{0};
+  uint16_t on_value_{0};
+  uint16_t off_value_{1};
   float min_temperature_{5.0f};
   float max_temperature_{30.0f};
   float step_{0.5f};

@@ -20,57 +20,12 @@ CONF_SOURCES = "sources"
 CONF_NAME = "name"
 CONF_SENSOR = "sensor"
 
-# ectoControl register map (see custom_components/ectocontrol_adapter/registers.py
-# in sokolovs/ec-adapter).
-WORK_MODE_REGISTER = 0x0039
-CONNECT_TYPE_REGISTER = 0x0030
-COOLANT_SETPOINT_REGISTER = 0x0031
-
-# REG_W_MODE choices.
-WORK_MODE_VALUES = {
-    0: "disabled",
-    1: "heating_only",
-    2: "dwh_only",
-    3: "heating_dwh",
-    4: "second_only",
-    5: "heating_second",
-}
-
-
-def _validate_work_mode_address(value: int) -> int:
-    if value == CONNECT_TYPE_REGISTER:
-        raise cv.Invalid(
-            "0x0030 is the Connect Type register (REG_W_CONNECT_TYPE: "
-            "0=adapter, 1=boiler_panel), not the Work Mode register. A climate "
-            "pointed at 0x0030 switches the temperature source instead of "
-            "enabling heating (symptom: 'Adapter' = HEAT, 'Boiler Panel' = OFF, "
-            "and the Connect Type select moves when you toggle the climate). "
-            "Use address: 0x0039 (REG_W_MODE: 0=disabled, 1=heating_only, "
-            "2=dwh_only, 3=heating_dwh, 4=second_only, 5=heating_second) and "
-            "leave 0x0030 to the Connect Type select."
-        )
-    if value == COOLANT_SETPOINT_REGISTER:
-        raise cv.Invalid(
-            "0x0031 is the Coolant setpoint register, not the Work Mode "
-            "register. Use address: 0x0039 for work mode and "
-            "temperature_address: 0x0031 for the setpoint."
-        )
-    return value
-
-
-def _validate_setpoint_address(value: int) -> int:
-    if value == CONNECT_TYPE_REGISTER:
-        raise cv.Invalid(
-            "0x0030 is the Connect Type register, not the coolant setpoint. "
-            "The coolant setpoint is 0x0031 (scale x10)."
-        )
-    if value == WORK_MODE_REGISTER:
-        raise cv.Invalid(
-            "0x0039 is the Work Mode register, not the coolant setpoint. "
-            "The coolant setpoint is 0x0031 (scale x10)."
-        )
-    return value
-
+# Defaults match the historical behaviour of this component:
+#   address 0x0030  -- Connect Type (REG_W_CONNECT_TYPE: 0 = adapter, 1 = boiler panel)
+#   on_value 0      -- Adapter  -> HEAT
+#   off_value 1     -- Boiler panel -> OFF
+# Both registers are write-only on ectoControl; the hub caches the value it
+# wrote once the adapter acknowledges it and the entity publishes that.
 EcAdapterTcpClimate = ec_adapter_tcp_ns.class_(
     "EcAdapterTcpClimate", cg.Component, climate.Climate
 )
@@ -78,21 +33,11 @@ EcAdapterTcpClimate = ec_adapter_tcp_ns.class_(
 CONFIG_SCHEMA = climate.climate_schema(EcAdapterTcpClimate).extend(
     {
         cv.GenerateID(CONF_EC_ADAPTER_TCP_ID): cv.use_id(EcAdapterTcp),
-        # Work mode register (0x0039): 0=disabled, 1=heating_only, 2=dwh_only,
-        # 3=heating_dwh, 4=second_only, 5=heating_second. The value read back is
-        # not always meaningful (many adapters are write-only here), so the
-        # climate entity only trusts a readback of 0..5 and otherwise keeps the
-        # state it set after a successful write.
-        cv.Optional(CONF_ADDRESS, default=WORK_MODE_REGISTER): cv.All(
-            cv.hex_uint16_t, _validate_work_mode_address
-        ),
-        # Coolant setpoint register, scaled by 10 (0x0031).
-        cv.Optional(CONF_TEMPERATURE_ADDRESS, default=COOLANT_SETPOINT_REGISTER): cv.All(
-            cv.hex_uint16_t, _validate_setpoint_address
-        ),
+        cv.Optional(CONF_ADDRESS, default=0x0030): cv.hex_uint16_t,
+        cv.Optional(CONF_TEMPERATURE_ADDRESS, default=0x0031): cv.hex_uint16_t,
         cv.Optional(CONF_TEMPERATURE_SCALE, default=10.0): cv.float_,
-        cv.Optional(CONF_ON_VALUE, default=1): cv.int_range(min=0, max=0xFFFF),
-        cv.Optional(CONF_OFF_VALUE, default=0): cv.int_range(min=0, max=0xFFFF),
+        cv.Optional(CONF_ON_VALUE, default=0): cv.int_range(min=0, max=0xFFFF),
+        cv.Optional(CONF_OFF_VALUE, default=1): cv.int_range(min=0, max=0xFFFF),
         cv.Optional(CONF_MIN_TEMPERATURE, default=5.0): cv.float_,
         cv.Optional(CONF_MAX_TEMPERATURE, default=30.0): cv.float_,
         cv.Optional(CONF_STEP, default=0.5): cv.float_,
