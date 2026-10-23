@@ -102,10 +102,16 @@ class EcAdapterTcpSelect : public Component, public select::Select, public EcAda
   void set_hub(EcAdapterTcp *hub) { this->hub_ = hub; }
   void set_address(uint16_t address) { this->address_ = address; }
   void add_option(const std::string &name, uint16_t value) { this->options_.emplace_back(name, value); }
+  void set_initial_option(const std::string &name) { this->initial_option_ = name; }
 
  protected:
   EcAdapterTcp *hub_{nullptr};
   uint16_t address_{0};
+  // Publish this option when nothing has been written yet (no flash value).
+  std::string initial_option_;
+  // Last value successfully written to the adapter, persisted in flash: the
+  // register is write-only, so it cannot be read back after a reboot.
+  ESPPreferenceObject pref_;
   std::vector<std::pair<std::string, uint16_t>> options_;
 };
 

@@ -146,7 +146,26 @@ void EcAdapterTcpSelect::setup() {
   this->hub_->add_listener(this);
   // Write-only register (0x0030 connect type, 0x0039 work mode): the adapter
   // answers reads with 0, so polling would overwrite the value we wrote.
-  // Keep the optimistic value cached by the hub after a successful write.
+  // Keep the optimistic value cached by the hub after a successful write, and
+  // persist it in flash so the entity is not "unknown" after a reboot.
+  this->pref_ = global_preferences->make_preference<uint16_t>(this->get_object_id_hash() ^ 0x5E1EC7u);
+  uint16_t stored = 0;
+  if (this->pref_.load(&stored)) {
+    for (auto &option : this->options_) {
+      if (option.second == stored) {
+        this->publish_state(option.first);
+        return;
+      }
+    }
+  }
+  if (!this->initial_option_.empty()) {
+    for (auto &option : this->options_) {
+      if (option.first == this->initial_option_) {
+        this->publish_state(option.first);
+        return;
+      }
+    }
+  }
 }
 
 void EcAdapterTcpSelect::dump_config() {
@@ -173,8 +192,10 @@ void EcAdapterTcpSelect::control(const std::string &value) {
     return;
   for (auto &option : this->options_) {
     if (option.first == value) {
-      if (this->hub_->write_register(this->address_, option.second))
+      if (this->hub_->write_register(this->address_, option.second)) {
         this->publish_state(value);
+        this->pref_.save(&option.second);
+      }
       return;
     }
   }
