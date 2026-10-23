@@ -1,0 +1,4 @@
+.esphome/
+*.bin
+.pio/
+__pycache__/

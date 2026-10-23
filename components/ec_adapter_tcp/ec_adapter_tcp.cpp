@@ -1,0 +1,288 @@
+#include "ec_adapter_tcp.h"
+
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
+
+#include <fcntl.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
+
+#include "esphome/core/log.h"
+
+namespace esphome {
+namespace ec_adapter_tcp {
+
+static const char *const TAG = "ec_adapter_tcp";
+
+void EcAdapterTcp::setup() { this->transaction_id_ = 0; }
+
+void EcAdapterTcp::dump_config() {
+  ESP_LOGCONFIG(TAG, "ectoControl adapter (Modbus TCP):");
+  ESP_LOGCONFIG(TAG, "  Host: %s", this->host_.c_str());
+  ESP_LOGCONFIG(TAG, "  Port: %u", (unsigned) this->port_);
+  ESP_LOGCONFIG(TAG, "  Unit ID: %u", (unsigned) this->unit_id_);
+  ESP_LOGCONFIG(TAG, "  Response timeout: %u ms", (unsigned) this->timeout_ms_);
+  ESP_LOGCONFIG(TAG, "  Polled registers: %u", (unsigned) this->addresses_.size());
+}
+
+void EcAdapterTcp::add_read_register(uint16_t address, uint8_t count) {
+  for (uint8_t i = 0; i < count; i++)
+    this->addresses_.insert((uint16_t) (address + i));
+}
+
+bool EcAdapterTcp::read_register(uint16_t address, uint16_t *value) const {
+  auto it = this->registers_.find(address);
+  if (it == this->registers_.end())
+    return false;
+  *value = it->second;
+  return true;
+}
+
+void EcAdapterTcp::close_connection_() {
+  if (this->sock_ >= 0) {
+    ::close(this->sock_);
+    this->sock_ = -1;
+  }
+  this->connected_ = false;
+}
+
+bool EcAdapterTcp::ensure_connected_() {
+  if (this->sock_ >= 0)
+    return true;
+
+  struct addrinfo hints;
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+
+  char port_str[8];
+  snprintf(port_str, sizeof(port_str), "%u", (unsigned) this->port_);
+
+  struct addrinfo *res = nullptr;
+  int gai = getaddrinfo(this->host_.c_str(), port_str, &hints, &res);
+  if (gai != 0 || res == nullptr) {
+    ESP_LOGW(TAG, "Cannot resolve '%s'", this->host_.c_str());
+    return false;
+  }
+
+  int sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (sock < 0) {
+    freeaddrinfo(res);
+    ESP_LOGW(TAG, "socket() failed: %d", errno);
+    return false;
+  }
+
+  int flags = fcntl(sock, F_GETFL, 0);
+  fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+
+  int ret = ::connect(sock, res->ai_addr, res->ai_addrlen);
+  freeaddrinfo(res);
+  if (ret < 0 && errno != EINPROGRESS) {
+    ::close(sock);
+    ESP_LOGW(TAG, "connect() failed: %d", errno);
+    return false;
+  }
+
+  if (ret < 0) {
+    fd_set wfds;
+    FD_ZERO(&wfds);
+    FD_SET(sock, &wfds);
+    struct timeval tv;
+    tv.tv_sec = this->timeout_ms_ / 1000;
+    tv.tv_usec = (this->timeout_ms_ % 1000) * 1000;
+    int sel = ::select(sock + 1, nullptr, &wfds, nullptr, &tv);
+    if (sel <= 0) {
+      ::close(sock);
+      ESP_LOGW(TAG, "connect timeout to %s:%u", this->host_.c_str(), (unsigned) this->port_);
+      return false;
+    }
+    int so_error = 0;
+    socklen_t len = sizeof(so_error);
+    if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len) < 0 || so_error != 0) {
+      ::close(sock);
+      ESP_LOGW(TAG, "connect failed: %d", so_error);
+      return false;
+    }
+  }
+
+  fcntl(sock, F_SETFL, flags);
+
+  struct timeval tv;
+  tv.tv_sec = this->timeout_ms_ / 1000;
+  tv.tv_usec = (this->timeout_ms_ % 1000) * 1000;
+  setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+  int nodelay = 1;
+  setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+
+  this->sock_ = sock;
+  this->connected_ = true;
+  ESP_LOGI(TAG, "Connected to %s:%u", this->host_.c_str(), (unsigned) this->port_);
+  return true;
+}
+
+bool EcAdapterTcp::send_all_(const uint8_t *data, size_t len) {
+  size_t sent = 0;
+  while (sent < len) {
+    ssize_t n = ::send(this->sock_, data + sent, len - sent, 0);
+    if (n < 0) {
+      if (errno == EINTR)
+        continue;
+      return false;
+    }
+    if (n == 0)
+      return false;
+    sent += (size_t) n;
+  }
+  return true;
+}
+
+bool EcAdapterTcp::recv_exact_(uint8_t *data, size_t len) {
+  size_t got = 0;
+  while (got < len) {
+    ssize_t n = ::recv(this->sock_, data + got, len - got, 0);
+    if (n < 0) {
+      if (errno == EINTR)
+        continue;
+      return false;
+    }
+    if (n == 0)
+      return false;
+    got += (size_t) n;
+  }
+  return true;
+}
+
+bool EcAdapterTcp::transact_(const uint8_t *pdu, size_t pdu_len, std::vector<uint8_t> &response) {
+  if (!this->ensure_connected_())
+    return false;
+
+  this->transaction_id_++;
+
+  uint8_t header[7];
+  header[0] = (uint8_t) (this->transaction_id_ >> 8);
+  header[1] = (uint8_t) (this->transaction_id_ & 0xFF);
+  header[2] = 0x00;
+  header[3] = 0x00;
+  uint16_t len = (uint16_t) (pdu_len + 1);
+  header[4] = (uint8_t) (len >> 8);
+  header[5] = (uint8_t) (len & 0xFF);
+  header[6] = this->unit_id_;
+
+  if (!this->send_all_(header, sizeof(header)) || !this->send_all_(pdu, pdu_len))
+    return false;
+
+  uint8_t rheader[7];
+  if (!this->recv_exact_(rheader, sizeof(rheader)))
+    return false;
+
+  uint16_t rlen = (uint16_t) ((rheader[4] << 8) | rheader[5]);
+  if (rlen < 2)
+    return false;
+
+  response.resize(rlen - 1);
+  if (!this->recv_exact_(response.data(), response.size()))
+    return false;
+
+  if (response[0] & 0x80) {
+    ESP_LOGW(TAG, "Modbus exception 0x%02X for function 0x%02X", response.size() > 1 ? response[1] : 0,
+             pdu[0]);
+    return false;
+  }
+  return true;
+}
+
+bool EcAdapterTcp::read_holding_(uint16_t start, uint16_t count, std::vector<uint16_t> &out) {
+  uint8_t pdu[5];
+  pdu[0] = 0x03;
+  pdu[1] = (uint8_t) (start >> 8);
+  pdu[2] = (uint8_t) (start & 0xFF);
+  pdu[3] = (uint8_t) (count >> 8);
+  pdu[4] = (uint8_t) (count & 0xFF);
+
+  std::vector<uint8_t> resp;
+  if (!this->transact_(pdu, sizeof(pdu), resp))
+    return false;
+  if (resp.size() < 2 || resp[1] != count * 2 || resp.size() < (size_t) (2 + count * 2))
+    return false;
+
+  out.clear();
+  out.reserve(count);
+  for (uint16_t i = 0; i < count; i++)
+    out.push_back((uint16_t) ((resp[2 + i * 2] << 8) | resp[3 + i * 2]));
+  return true;
+}
+
+bool EcAdapterTcp::write_register(uint16_t address, uint16_t value) {
+  uint8_t pdu[5];
+  pdu[0] = 0x06;
+  pdu[1] = (uint8_t) (address >> 8);
+  pdu[2] = (uint8_t) (address & 0xFF);
+  pdu[3] = (uint8_t) (value >> 8);
+  pdu[4] = (uint8_t) (value & 0xFF);
+
+  std::vector<uint8_t> resp;
+  if (!this->transact_(pdu, sizeof(pdu), resp)) {
+    this->close_connection_();
+    ESP_LOGW(TAG, "Write 0x%04X = %u failed", address, (unsigned) value);
+    return false;
+  }
+  this->registers_[address] = value;
+  return true;
+}
+
+void EcAdapterTcp::update() {
+  if (this->addresses_.empty())
+    return;
+
+  if (!this->ensure_connected_()) {
+    this->close_connection_();
+    return;
+  }
+
+  // Merge the requested addresses into contiguous ranges (max 120 registers per request).
+  std::vector<std::pair<uint16_t, uint16_t>> ranges;
+  uint16_t start = 0;
+  uint16_t prev = 0;
+  bool have = false;
+  for (uint16_t address : this->addresses_) {
+    if (!have) {
+      start = address;
+      prev = address;
+      have = true;
+      continue;
+    }
+    if (address == (uint16_t) (prev + 1) && (uint16_t) (address - start) < 120) {
+      prev = address;
+      continue;
+    }
+    ranges.emplace_back(start, (uint16_t) (prev - start + 1));
+    start = address;
+    prev = address;
+  }
+  if (have)
+    ranges.emplace_back(start, (uint16_t) (prev - start + 1));
+
+  for (auto &range : ranges) {
+    std::vector<uint16_t> values;
+    if (!this->read_holding_(range.first, range.second, values)) {
+      this->close_connection_();
+      ESP_LOGW(TAG, "Read of 0x%04X (%u regs) failed", range.first, (unsigned) range.second);
+      return;
+    }
+    for (size_t i = 0; i < values.size(); i++)
+      this->registers_[(uint16_t) (range.first + i)] = values[i];
+  }
+
+  for (auto *listener : this->listeners_)
+    listener->on_registers_updated();
+}
+
+}  // namespace ec_adapter_tcp
+}  // namespace esphome
