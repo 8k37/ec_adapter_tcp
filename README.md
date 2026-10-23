@@ -53,7 +53,6 @@ flicking back and forth.
 The thermostat needs a known current temperature, i.e. one of the sources
 described above (an external sensor is the reliable choice: the write-only
 work-mode register cannot be read back).
-## Reference `climate` configuration
 ## Number entities
 
 `number` writes a single 16-bit register. The ectoControl `REG_W_*` registers
@@ -83,3 +82,7 @@ What gets published, in order:
 `initial_value` is validated against `min_value`/`max_value`. It is written to
 the adapter only when the adapter acknowledges it; if the adapter is offline at
 boot the hub retries, then logs a warning instead of silently losing it.
+## Reference `climate` configuration
+
+Everything except `ec_adapter_tcp_id` is optional. The defaults match the
+register map of the ectoControl adapters, so a minimal entry is enough:
