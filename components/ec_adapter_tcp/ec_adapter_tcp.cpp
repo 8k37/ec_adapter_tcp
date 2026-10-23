@@ -134,9 +134,12 @@ void EcAdapterTcp::fail_cycle_(const char *reason, bool peer_closed) {
       this->writes_use_fc16_ = true;
       ESP_LOGW(TAG, "FC06 is not supported by this server (%s); using FC16 for writes from now on",
                reason);
+    ESP_LOGE(TAG, "Write 0x%04X = %u failed: %s. Both FC06 and FC16 were rejected or got no reply -"
+=======
       ESP_LOGD(TAG, "Write 0x%04X = %u retrying with FC16", front.address, (unsigned) front.value);
       return;
     }
+    ESP_LOGE(TAG, "Write 0x%04X = %u failed: %s. Both FC06 and FC16 were rejected or got no reply -"
 =======
     ESP_LOGE(TAG, "Write 0x%04X = %u failed: %s. Both FC06 and FC16 were rejected or got no reply -"
                   " check that the Modbus TCP server/bridge forwards write function codes to the RTU"
