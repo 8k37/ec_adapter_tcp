@@ -43,6 +43,7 @@ class EcAdapterTcp : public PollingComponent {
   bool ensure_connected_();
   void close_connection_();
   bool transact_(const uint8_t *pdu, size_t pdu_len, std::vector<uint8_t> &response);
+  bool transact_once_(const uint8_t *pdu, size_t pdu_len, std::vector<uint8_t> &response);
   bool read_holding_(uint16_t start, uint16_t count, std::vector<uint16_t> &out);
   bool send_all_(const uint8_t *data, size_t len);
   bool recv_exact_(uint8_t *data, size_t len);

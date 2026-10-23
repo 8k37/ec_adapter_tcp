@@ -160,10 +160,25 @@ bool EcAdapterTcp::recv_exact_(uint8_t *data, size_t len) {
 }
 
 bool EcAdapterTcp::transact_(const uint8_t *pdu, size_t pdu_len, std::vector<uint8_t> &response) {
-  this->last_exception_ = 0;
-  if (!this->ensure_connected_())
-    return false;
+  // The adapter silently drops idle TCP connections. The stale socket still
+  // looks fine (sock_ >= 0) until the first recv() returns 0, which used to
+  // surface as a bogus "Read of 0x.... failed". Retry once on a fresh socket.
+  for (int attempt = 0; attempt < 2; attempt++) {
+    this->last_exception_ = 0;
+    if (!this->ensure_connected_())
+      return false;
+    if (this->transact_once_(pdu, pdu_len, response))
+      return true;
+    if (this->last_exception_ != 0)
+      return false;  // the adapter answered properly, retrying will not help
+    this->close_connection_();
+    if (attempt == 0)
+      ESP_LOGD(TAG, "Connection lost, reconnecting");
+  }
+  return false;
+}
 
+bool EcAdapterTcp::transact_once_(const uint8_t *pdu, size_t pdu_len, std::vector<uint8_t> &response) {
   this->transaction_id_++;
 
   uint8_t header[7];
@@ -183,9 +198,23 @@ bool EcAdapterTcp::transact_(const uint8_t *pdu, size_t pdu_len, std::vector<uin
   if (!this->recv_exact_(rheader, sizeof(rheader)))
     return false;
 
+  uint16_t r_transaction = (uint16_t) ((rheader[0] << 8) | rheader[1]);
+  uint16_t r_protocol = (uint16_t) ((rheader[2] << 8) | rheader[3]);
   uint16_t rlen = (uint16_t) ((rheader[4] << 8) | rheader[5]);
-  if (rlen < 2)
+  if (r_protocol != 0 || rlen < 2) {
+    ESP_LOGW(TAG, "Malformed MBAP header (protocol %u, length %u)", r_protocol, rlen);
     return false;
+  }
+  if (r_transaction != this->transaction_id_) {
+    ESP_LOGW(TAG, "Transaction id mismatch (sent %u, got %u)", (unsigned) this->transaction_id_,
+             (unsigned) r_transaction);
+    return false;
+  }
+  if (rheader[6] != this->unit_id_) {
+    ESP_LOGW(TAG, "Unit id mismatch (sent %u, got %u)", (unsigned) this->unit_id_,
+             (unsigned) rheader[6]);
+    return false;
+  }
 
   response.resize(rlen - 1);
   if (!this->recv_exact_(response.data(), response.size()))
