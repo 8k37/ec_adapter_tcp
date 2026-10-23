@@ -107,7 +107,10 @@ void EcAdapterTcpNumber::setup() {
   if (this->hub_ == nullptr)
     return;
   this->hub_->add_listener(this);
-  this->hub_->add_read_register(this->address_, 1);
+  // REG_W_* registers are write-only on ectoControl: reading them returns 0
+  // and would clobber the value we just wrote. The official HA integration
+  // (sokolovs/ec-adapter) never polls them either. State is optimistic: the
+  // hub caches the value it wrote once the adapter acknowledges the write.
 }
 
 void EcAdapterTcpNumber::dump_config() {
@@ -141,7 +144,9 @@ void EcAdapterTcpSelect::setup() {
   if (this->hub_ == nullptr)
     return;
   this->hub_->add_listener(this);
-  this->hub_->add_read_register(this->address_, 1);
+  // Write-only register (0x0030 connect type, 0x0039 work mode): the adapter
+  // answers reads with 0, so polling would overwrite the value we wrote.
+  // Keep the optimistic value cached by the hub after a successful write.
 }
 
 void EcAdapterTcpSelect::dump_config() {
@@ -202,8 +207,10 @@ void EcAdapterTcpClimate::add_temperature_source(const std::string &name, sensor
 void EcAdapterTcpClimate::setup() {
   if (this->hub_ != nullptr) {
     this->hub_->add_listener(this);
-    this->hub_->add_read_register(this->address_, 1);
-    this->hub_->add_read_register(this->temperature_address_, 1);
+    // 0x0039 (work mode) and 0x0031 (coolant setpoint) are write-only: reads
+    // return 0, not the applied value. Do not poll them; the hub caches the
+    // value from the write acknowledgement and on_registers_updated() reads
+    // that cache, mirroring the HA integration's optimistic behaviour.
   }
 
   // The setpoint is a local (virtual) room temperature; persist it across reboots.
@@ -253,10 +260,10 @@ void EcAdapterTcpClimate::on_source_value_(uint8_t index, float value) {
 
 void EcAdapterTcpClimate::dump_config() {
   LOG_CLIMATE("", "ectoControl climate", this);
-  ESP_LOGCONFIG(TAG, "  On/off register: 0x%04X (on=%u, off=%u)", this->address_, (unsigned) this->on_value_,
-                (unsigned) this->off_value_);
-  ESP_LOGCONFIG(TAG, "  Target temperature register: 0x%04X (scale x%.3f)", this->temperature_address_,
-                this->temperature_scale_);
+  ESP_LOGCONFIG(TAG, "  Work mode register: 0x%04X (on=%u, off=%u, write-only)", this->address_,
+                (unsigned) this->on_value_, (unsigned) this->off_value_);
+  ESP_LOGCONFIG(TAG, "  Target temperature register: 0x%04X (scale x%.3f, write-only)",
+                this->temperature_address_, this->temperature_scale_);
   ESP_LOGCONFIG(TAG, "  Setpoint: local, initial %.1f, range %.1f..%.1f step %.1f",
                 this->initial_target_temperature_, this->min_temperature_, this->max_temperature_, this->step_);
 }
@@ -274,13 +281,11 @@ void EcAdapterTcpClimate::on_registers_updated() {
   if (this->hub_ == nullptr)
     return;
 
-  // 0x0039 (work mode) is write-only on many ectoControl adapters: the value
-  // read back is unrelated to the actual mode (e.g. 40 = coolant setpoint).
-  // Accept the readback only when it is a valid work-mode code (0..5);
-  // otherwise keep the optimistic state set by control() so a successful write
-  // does not flip back to OFF on the next poll.
+  // Both registers are write-only, so the hub only holds the value from a
+  // successful write. Before the first write there is no cached value and the
+  // mode stays as initialised in setup().
   uint16_t raw = 0;
-  if (this->hub_->read_register(this->address_, &raw) && raw <= 5)
+  if (this->hub_->read_register(this->address_, &raw))
     this->mode = (raw == this->on_value_) ? climate::CLIMATE_MODE_HEAT : climate::CLIMATE_MODE_OFF;
 
   uint16_t target_raw = 0;
