@@ -27,8 +27,9 @@ EcAdapterTcpClimate = ec_adapter_tcp_ns.class_(
 CONFIG_SCHEMA = climate.climate_schema(EcAdapterTcpClimate).extend(
     {
         cv.GenerateID(CONF_EC_ADAPTER_TCP_ID): cv.use_id(EcAdapterTcp),
-        # Register shared with the "Connect Type" select (0x0030 by default).
+        # Work mode register (0x0039: 0=disabled, 1=heating, 2=dwh, 3=heating+dwh).
         cv.Optional(CONF_ADDRESS, default=0x0039): cv.hex_uint16_t,
+        # Coolant setpoint register, scaled by 10 (0x0031).
         cv.Optional(CONF_TEMPERATURE_ADDRESS, default=0x0031): cv.hex_uint16_t,
         cv.Optional(CONF_TEMPERATURE_SCALE, default=10.0): cv.float_,
         cv.Optional(CONF_ON_VALUE, default=1): cv.int_range(min=0, max=0xFFFF),
