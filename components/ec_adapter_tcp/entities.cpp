@@ -203,6 +203,7 @@ void EcAdapterTcpClimate::setup() {
   if (this->hub_ != nullptr) {
     this->hub_->add_listener(this);
     this->hub_->add_read_register(this->address_, 1);
+    this->hub_->add_read_register(this->temperature_address_, 1);
   }
 
   // The setpoint is a local (virtual) room temperature; persist it across reboots.
@@ -254,6 +255,8 @@ void EcAdapterTcpClimate::dump_config() {
   LOG_CLIMATE("", "ectoControl climate", this);
   ESP_LOGCONFIG(TAG, "  On/off register: 0x%04X (on=%u, off=%u)", this->address_, (unsigned) this->on_value_,
                 (unsigned) this->off_value_);
+  ESP_LOGCONFIG(TAG, "  Target temperature register: 0x%04X (scale x%.3f)", this->temperature_address_,
+                this->temperature_scale_);
   ESP_LOGCONFIG(TAG, "  Setpoint: local, initial %.1f, range %.1f..%.1f step %.1f",
                 this->initial_target_temperature_, this->min_temperature_, this->max_temperature_, this->step_);
 }
@@ -274,6 +277,12 @@ void EcAdapterTcpClimate::on_registers_updated() {
   uint16_t raw = 0;
   if (this->hub_->read_register(this->address_, &raw))
     this->mode = (raw == this->on_value_) ? climate::CLIMATE_MODE_HEAT : climate::CLIMATE_MODE_OFF;
+
+  uint16_t target_raw = 0;
+  if (this->hub_->read_register(this->temperature_address_, &target_raw)) {
+    float divisor = this->temperature_scale_ == 0.0f ? 1.0f : this->temperature_scale_;
+    this->target_temperature = (float) target_raw / divisor;
+  }
 
   // current_temperature is fed externally via set_current_temperature().
   this->publish_state();
@@ -297,9 +306,15 @@ void EcAdapterTcpClimate::control(const climate::ClimateCall &call) {
       value = this->min_temperature_;
     if (value > this->max_temperature_)
       value = this->max_temperature_;
-    this->target_temperature = value;
-    this->pref_.save(&value);
-    changed = true;
+    if (this->hub_ != nullptr) {
+      float multiplier = this->temperature_scale_ == 0.0f ? 1.0f : this->temperature_scale_;
+      uint16_t raw = (uint16_t) lroundf(value * multiplier);
+      if (this->hub_->write_register(this->temperature_address_, raw)) {
+        this->target_temperature = value;
+        this->pref_.save(&value);
+        changed = true;
+      }
+    }
   }
 
   if (changed)
