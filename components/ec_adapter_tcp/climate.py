@@ -53,9 +53,11 @@ CONFIG_SCHEMA = climate.climate_schema(EcAdapterTcpClimate).extend(
         cv.Optional(CONF_MAX_TEMPERATURE, default=30.0): cv.float_,
         cv.Optional(CONF_STEP, default=0.5): cv.float_,
         cv.Optional(CONF_INITIAL_TARGET_TEMPERATURE, default=20.0): cv.float_,
-        # Switch the work mode automatically: adapter (on_value) while the
-        # current temperature is below the target, boiler panel (off_value)
-        # once the target plus the hysteresis has been reached.
+        # Thermostat: while the climate is on, hand the boiler to the adapter
+        # (on_value) when the current temperature is below the target and back
+        # to the boiler's own panel (off_value) once the target plus the
+        # hysteresis is reached. The climate mode itself is never changed
+        # automatically; the state is reported through `action`.
         cv.Optional(CONF_AUTO_MODE, default=False): cv.boolean,
         cv.Optional(CONF_AUTO_MODE_HYSTERESIS, default=0.3): cv.float_range(min=0.0, max=10.0),
         cv.Optional(CONF_SOURCES, default=[]): cv.ensure_list(

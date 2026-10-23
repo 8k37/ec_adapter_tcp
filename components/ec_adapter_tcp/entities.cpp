@@ -309,7 +309,11 @@ void EcAdapterTcpClimate::setup() {
       this->current_temperature = value;
   }
 
-  this->mode = climate::CLIMATE_MODE_OFF;
+  // Restore the commanded mode: it is the user's choice, not a readback of the
+  // write-only work-mode register.
+  this->mode = have_mode ? (climate::ClimateMode) stored_mode : climate::CLIMATE_MODE_OFF;
+  this->action = (this->mode == climate::CLIMATE_MODE_OFF) ? climate::CLIMATE_ACTION_OFF
+                                                           : climate::CLIMATE_ACTION_IDLE;
   this->publish_state();
 
   // Push the last known values back to the adapter on the first cycle after
@@ -323,8 +327,12 @@ void EcAdapterTcpClimate::setup() {
       this->hub_->add_restore_write(this->temperature_address_, raw);
     }
     if (have_mode) {
-      uint16_t raw = (stored_mode == (uint8_t) climate::CLIMATE_MODE_HEAT) ? this->on_value_
-                                                                          : this->off_value_;
+      // With auto_mode the register is re-evaluated on the first update, so a
+      // warm room does not get the adapter switched on just because it was on
+      // before the reboot: restore the idle state and let the thermostat decide.
+      uint16_t raw = (stored_mode == (uint8_t) climate::CLIMATE_MODE_HEAT && !this->auto_mode_)
+                         ? this->on_value_
+                         : this->off_value_;
       this->hub_->add_restore_write(this->address_, raw);
     }
   }
@@ -345,35 +353,55 @@ void EcAdapterTcpClimate::set_active_source(const std::string &name) {
   ESP_LOGW(TAG, "Unknown temperature source '%s'", name.c_str());
 }
 
-bool EcAdapterTcpClimate::maybe_apply_auto_mode_() {
-  if (!this->auto_mode_ || this->hub_ == nullptr)
-    return false;
-  if (std::isnan(this->current_temperature) || std::isnan(this->target_temperature))
-    return false;
+void EcAdapterTcpClimate::apply_auto_mode_() {
+  if (!this->auto_mode_)
+    return;
 
-  // Thermostat with a dead band: start heating below the setpoint, stop only
-  // once the setpoint plus the hysteresis is reached. Anything in between keeps
-  // the current mode, so the adapter is not toggled on every poll.
-  climate::ClimateMode desired = this->mode;
-  if (this->current_temperature < this->target_temperature) {
-    desired = climate::CLIMATE_MODE_HEAT;
-  } else if (this->current_temperature >= this->target_temperature + this->auto_mode_hysteresis_) {
-    desired = climate::CLIMATE_MODE_OFF;
+  // `mode` is the user's command: the thermostat never turns the climate on or
+  // off by itself, it only decides who drives the boiler.
+  if (this->mode != climate::CLIMATE_MODE_HEAT) {
+    this->action = climate::CLIMATE_ACTION_OFF;
+    return;
   }
-  if (desired == this->mode)
-    return false;
+  if (this->hub_ == nullptr)
+    return;
+  if (std::isnan(this->current_temperature) || std::isnan(this->target_temperature)) {
+    this->action = climate::CLIMATE_ACTION_IDLE;
+    return;
+  }
 
-  uint16_t value = (desired == climate::CLIMATE_MODE_HEAT) ? this->on_value_ : this->off_value_;
-  if (!this->hub_->write_register(this->address_, value))
-    return false;
+  // The work-mode register is write-only, so the hub cache holds the value of
+  // the last acknowledged write: use it to avoid rewriting the same value.
+  uint16_t cached = 0;
+  bool have_cached = this->hub_->read_register(this->address_, &cached);
 
-  this->mode = desired;
-  uint8_t mode_byte = (uint8_t) this->mode;
-  this->mode_pref_.save(&mode_byte);
+  // Below the setpoint the boiler is handed to the adapter (on_value). At or
+  // above the setpoint plus the hysteresis it goes back to its own panel
+  // (off_value), which is the thermostat's idle state: the climate is still on,
+  // but the adapter does not heat. Inside the dead band nothing is written, so
+  // the register is not toggled on every poll.
+  uint16_t desired;
+  if (this->current_temperature < this->target_temperature) {
+    desired = this->on_value_;
+    this->action = climate::CLIMATE_ACTION_HEATING;
+  } else if (this->current_temperature >= this->target_temperature + this->auto_mode_hysteresis_) {
+    desired = this->off_value_;
+    this->action = climate::CLIMATE_ACTION_IDLE;
+  } else {
+    this->action = (have_cached && cached == this->on_value_) ? climate::CLIMATE_ACTION_HEATING
+                                                              : climate::CLIMATE_ACTION_IDLE;
+    return;
+  }
+
+  if (have_cached && cached == desired)
+    return;
+  if (!this->hub_->write_register(this->address_, desired)) {
+    ESP_LOGW(TAG, "Auto mode: writing 0x%04X = %u failed", this->address_, (unsigned) desired);
+    return;
+  }
   ESP_LOGI(TAG, "Auto mode: current %.1f, target %.1f -> %s", this->current_temperature,
            this->target_temperature,
-           desired == climate::CLIMATE_MODE_HEAT ? "adapter (heat)" : "boiler panel (off)");
-  return true;
+           desired == this->on_value_ ? "adapter (heating)" : "boiler panel (idle)");
 }
 
 void EcAdapterTcpClimate::on_source_value_(uint8_t index, float value) {
@@ -392,7 +420,7 @@ void EcAdapterTcpClimate::on_source_value_(uint8_t index, float value) {
   ESP_LOGV(TAG, "Current temperature %.2f from source '%s'", value,
            this->sources_[index].first.c_str());
   this->current_temperature = value;
-  this->maybe_apply_auto_mode_();
+  this->apply_auto_mode_();
   this->publish_state();
 }
 
@@ -417,7 +445,8 @@ void EcAdapterTcpClimate::dump_config() {
   ESP_LOGCONFIG(TAG, "  Setpoint: local, initial %.1f, range %.1f..%.1f step %.1f",
                 this->initial_target_temperature_, this->min_temperature_, this->max_temperature_, this->step_);
   if (this->auto_mode_)
-    ESP_LOGCONFIG(TAG, "  Auto mode: on, hysteresis %.1f", this->auto_mode_hysteresis_);
+    ESP_LOGCONFIG(TAG, "  Auto mode: on, hysteresis %.1f (mode stays as commanded, state in action)",
+                  this->auto_mode_hysteresis_);
 }
 
 climate::ClimateTraits EcAdapterTcpClimate::traits() {
@@ -435,13 +464,9 @@ void EcAdapterTcpClimate::on_registers_updated() {
   if (this->hub_ == nullptr)
     return;
 
-  // Both registers are write-only, so the hub only holds the value from a
-  // successful write. Before the first write there is no cached value and the
-  // mode stays as initialised in setup().
-  uint16_t raw = 0;
-  if (this->hub_->read_register(this->address_, &raw))
-    this->mode = (raw == this->on_value_) ? climate::CLIMATE_MODE_HEAT : climate::CLIMATE_MODE_OFF;
-
+  // The work-mode register is write-only and `mode` is the user's command,
+  // persisted in flash: it is never derived from the register cache here,
+  // otherwise the thermostat's own writes would flip the climate on and off.
   uint16_t target_raw = 0;
   if (this->hub_->read_register(this->temperature_address_, &target_raw)) {
     float divisor = this->temperature_scale_ == 0.0f ? 1.0f : this->temperature_scale_;
@@ -468,7 +493,7 @@ void EcAdapterTcpClimate::on_registers_updated() {
     }
   }
 
-  this->maybe_apply_auto_mode_();
+  this->apply_auto_mode_();
 
   this->publish_state();
 }
@@ -478,12 +503,27 @@ void EcAdapterTcpClimate::control(const climate::ClimateCall &call) {
 
   if (call.get_mode().has_value()) {
     climate::ClimateMode mode = *call.get_mode();
-    uint16_t value = (mode == climate::CLIMATE_MODE_OFF) ? this->off_value_ : this->on_value_;
-    if (this->hub_ == nullptr || this->hub_->write_register(this->address_, value)) {
-      this->mode = (mode == climate::CLIMATE_MODE_OFF) ? climate::CLIMATE_MODE_OFF : climate::CLIMATE_MODE_HEAT;
+    if (this->auto_mode_ && mode != climate::CLIMATE_MODE_OFF) {
+      // Turning the climate on only records the wish to heat. Whether the
+      // adapter is actually engaged is decided by apply_auto_mode_(): in an
+      // already warm room the thermostat stays idle and the adapter is left
+      // alone until the temperature drops below the setpoint.
+      this->mode = climate::CLIMATE_MODE_HEAT;
       uint8_t mode_byte = (uint8_t) this->mode;
       this->mode_pref_.save(&mode_byte);
+      this->apply_auto_mode_();
       changed = true;
+    } else {
+      uint16_t value = (mode == climate::CLIMATE_MODE_OFF) ? this->off_value_ : this->on_value_;
+      if (this->hub_ == nullptr || this->hub_->write_register(this->address_, value)) {
+        this->mode =
+            (mode == climate::CLIMATE_MODE_OFF) ? climate::CLIMATE_MODE_OFF : climate::CLIMATE_MODE_HEAT;
+        this->action = (this->mode == climate::CLIMATE_MODE_OFF) ? climate::CLIMATE_ACTION_OFF
+                                                                 : climate::CLIMATE_ACTION_HEATING;
+        uint8_t mode_byte = (uint8_t) this->mode;
+        this->mode_pref_.save(&mode_byte);
+        changed = true;
+      }
     }
   }
 
@@ -503,6 +543,10 @@ void EcAdapterTcpClimate::control(const climate::ClimateCall &call) {
       }
     }
   }
+
+  // A new setpoint takes effect immediately, without waiting for the next poll.
+  if (this->auto_mode_)
+    this->apply_auto_mode_();
 
   if (changed)
     this->publish_state();

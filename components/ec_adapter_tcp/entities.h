@@ -160,10 +160,13 @@ class EcAdapterTcpClimate : public Component, public climate::Climate, public Ec
     this->step_ = step;
   }
   void set_initial_target_temperature(float value) { this->initial_target_temperature_ = value; }
-  // Automatic mode: switch the work mode to on_value (adapter / heating) while
-  // the current temperature is below the target temperature and back to
-  // off_value (boiler panel / off) once the target plus the hysteresis has been
-  // reached. Off by default: the mode is then fully manual.
+  // Thermostat. `mode` always stays the user's command: the component never
+  // turns the climate on or off by itself. While the climate is on, the
+  // thermostat only decides who drives the boiler: the adapter (on_value) when
+  // the current temperature is below the target, the boiler's own panel
+  // (off_value) once the target plus the hysteresis is reached. The state is
+  // reported through `action`, so a warm room leaves the thermostat idle
+  // instead of starting the adapter.
   void set_auto_mode(bool auto_mode) { this->auto_mode_ = auto_mode; }
   void set_auto_mode_hysteresis(float hysteresis) { this->auto_mode_hysteresis_ = hysteresis; }
 
@@ -186,10 +189,9 @@ class EcAdapterTcpClimate : public Component, public climate::Climate, public Ec
 
  protected:
   void on_source_value_(uint8_t index, float value);
-  // Compare the current temperature with the target and switch the work mode
-  // register when auto_mode_ is enabled and both values are known. Returns true
-  // when the mode was changed (and the register written).
-  bool maybe_apply_auto_mode_();
+  // Thermostat step: hands the boiler to the adapter or back to its own panel
+  // and updates `action`. Never changes `mode`. No-op when auto_mode_ is off.
+  void apply_auto_mode_();
 
   EcAdapterTcp *hub_{nullptr};
   uint16_t address_{0x0030};
