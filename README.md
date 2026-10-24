@@ -101,8 +101,26 @@ The window may wrap around midnight, so the default `23 -> 7` means "23:00 to
 07:00". `sleep_start_hour` and `sleep_end_hour` must differ.
 
 Because the schedule is time driven, a `time` component is required whenever
-`sleep_temperature` is set: point `time_id` at it (e.g. the `homeassistant`
-time platform, which follows the Home Assistant local time zone).
+`sleep_temperature` is set: point `time_id` at it.
+
+> **Common pitfall:** the id must belong to a **`time:` platform**, not to a
+> `sensor:`. A Home Assistant `time` *sensor* (for example a `homeassistant`
+> sensor with `entity_id: sensor.time`) is a different component, and ESPHome
+> rejects it with `D 'ha_time' of type homeassistant::HomeassistantSensor
+> doesn't inherit from time::RealTimeClock`. Define the clock like this
+> instead:
+>
+> ```yaml
+> time:
+>   - platform: homeassistant   # follows the Home Assistant time zone
+>     id: ha_time
+>   # or, without Home Assistant:
+>   # - platform: sntp
+>   #   id: ha_time
+>   #   timezone: Europe/Moscow
+> ```
+>
+> and keep a sensor with a different id if you still need one.
 
 Manual control:
 

@@ -46,7 +46,19 @@ def _validate_sleep(config):
         if CONF_TIME_ID not in config:
             raise cv.Invalid(
                 "time_id is required when sleep_temperature is set: the sleep "
-                "preset is switched automatically by the local time"
+                "preset is switched automatically by the local time.\n"
+                "Add a 'time:' platform and point time_id at it, for example:\n"
+                "  time:\n"
+                "    - platform: homeassistant   # or: sntp\n"
+                "      id: ha_time\n"
+                "  climate:\n"
+                "    - platform: ec_adapter_tcp\n"
+                "      sleep_temperature: 17.5\n"
+                "      time_id: ha_time\n"
+                "time_id must reference a 'time:' platform. A 'sensor:' with "
+                "the same id (e.g. a Home Assistant 'time' sensor) is a "
+                "different component; ESPHome will reject it with "
+                "'doesn't inherit from time::RealTimeClock'."
             )
         if not (
             config[CONF_MIN_TEMPERATURE]
