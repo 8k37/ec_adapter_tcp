@@ -307,6 +307,21 @@ void EcAdapterTcpClimate::setup() {
   // aside so leaving the night window restores it.
   this->normal_target_ = this->target_temperature;
 
+  // The sleep preset keeps its own setpoint, persisted separately so a change
+  // made while the preset is active survives a reboot and is reused the next
+  // time the night window opens.
+  if (this->sleep_enabled_) {
+    this->sleep_pref_ =
+        global_preferences->make_preference<float>(this->get_object_id_hash() ^ 0x5EE9C0DEu);
+    float stored_sleep = 0.0f;
+    if (this->sleep_pref_.load(&stored_sleep) &&
+        stored_sleep >= this->min_temperature_ - 0.01f &&
+        stored_sleep <= this->max_temperature_ + 0.01f) {
+      this->sleep_temperature_ = stored_sleep;
+      ESP_LOGD(TAG, "Sleep preset: restored setpoint %.1f", stored_sleep);
+    }
+  }
+
   // Work mode is write-only too: persist the last commanded mode.
   this->mode_pref_ =
       global_preferences->make_preference<uint8_t>(this->get_object_id_hash() ^ 0x1F123BB5u);
@@ -654,25 +669,29 @@ void EcAdapterTcpClimate::control(const climate::ClimateCall &call) {
     if (value > this->max_temperature_)
       value = this->max_temperature_;
     // The setpoint is local: store and publish it even when the adapter is
-    // unreachable, so the UI never silently keeps an old value. The write is
-    // queued and retried by the hub.
-    // A manual setpoint change ends the night preset: the user just asked for
-    // exactly this temperature. The schedule re-applies sleep at the next edge.
+    // unreachable, so the UI never silently keeps an old value.
     if (this->sleep_active_) {
-      this->sleep_active_ = false;
-      this->preset = climate::CLIMATE_PRESET_NONE;
+      // While the night preset is active a setpoint change edits the preset
+      // itself: the new value is persisted and reused the next time the window
+      // opens, and the preset stays on. The normal setpoint is untouched, and
+      // the adapter's setpoint register is not written, matching the rule that
+      // the night value never reaches the boiler.
+      this->sleep_temperature_ = value;
+      this->sleep_pref_.save(&value);
+      this->target_temperature = value;
+    } else {
+      this->normal_target_ = value;
+      this->target_temperature = value;
+      this->pref_.save(&value);
+      if (this->hub_ != nullptr) {
+        float multiplier = this->temperature_scale_ == 0.0f ? 1.0f : this->temperature_scale_;
+        uint16_t raw = (uint16_t) lroundf(value * multiplier);
+        if (!this->hub_->write_register(this->temperature_address_, raw))
+          ESP_LOGW(TAG, "Could not queue setpoint 0x%04X = %u", this->temperature_address_,
+                   (unsigned) raw);
+      }
     }
-    this->normal_target_ = value;
-    this->target_temperature = value;
-    this->pref_.save(&value);
     changed = true;
-    if (this->hub_ != nullptr) {
-      float multiplier = this->temperature_scale_ == 0.0f ? 1.0f : this->temperature_scale_;
-      uint16_t raw = (uint16_t) lroundf(value * multiplier);
-      if (!this->hub_->write_register(this->temperature_address_, raw))
-        ESP_LOGW(TAG, "Could not queue setpoint 0x%04X = %u", this->temperature_address_,
-                 (unsigned) raw);
-    }
   }
 
   // A new setpoint takes effect immediately, without waiting for the next poll.

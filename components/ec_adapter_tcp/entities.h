@@ -185,6 +185,9 @@ class EcAdapterTcpClimate : public Component, public climate::Climate, public Ec
   // preset and uses `temperature` as its setpoint between `start_hour`
   // (inclusive) and `end_hour` (exclusive) of the local time. The normal
   // setpoint is kept untouched and restored when the window ends.
+  // `temperature` is only the initial value: a setpoint change made while the
+  // preset is active edits it and persists the new value in flash, so the
+  // preset stays on and is reused with the new temperature at the next window.
   void set_sleep_config(float temperature, uint8_t start_hour, uint8_t end_hour) {
     this->sleep_temperature_ = temperature;
     this->sleep_start_hour_ = start_hour;
@@ -218,8 +221,9 @@ class EcAdapterTcpClimate : public Component, public climate::Climate, public Ec
   // True when `hour` (0..23, local time) falls inside the night window. The
   // window may wrap around midnight (the default 23 -> 7 does).
   bool is_sleep_window_(uint8_t hour) const;
-  // Switch the sleep preset on or off: swaps the published setpoint, writes it
-  // to the adapter and re-evaluates the thermostat. No-op when unchanged.
+  // Switch the sleep preset on or off: swaps the published setpoint (local to
+  // this thermostat, never written to the adapter's setpoint register) and
+  // re-evaluates the thermostat. No-op when unchanged.
   void set_sleep_active_(bool active);
 
   EcAdapterTcp *hub_{nullptr};
@@ -255,6 +259,9 @@ class EcAdapterTcpClimate : public Component, public climate::Climate, public Ec
   ESPPreferenceObject pref_;
   ESPPreferenceObject mode_pref_;
   ESPPreferenceObject source_pref_;
+  // The sleep setpoint is persisted separately from the normal one, so a change
+  // made while the preset is active survives a reboot and the night window.
+  ESPPreferenceObject sleep_pref_;
 
   std::vector<std::pair<std::string, sensor::Sensor *>> sources_;
   std::vector<float> source_values_;

@@ -126,10 +126,15 @@ Manual control:
 
 - selecting the `sleep` preset by hand switches the night setpoint on
   immediately, `none` switches it back;
-- changing the target temperature by hand leaves the sleep preset, so the
-  slider value is not immediately overwritten.
+- changing the target temperature **while the sleep preset is active** edits
+  the preset itself: the new value is saved to flash and reused the next time
+  the window opens, and the preset stays on;
+- changing the target temperature outside the window updates the normal
+  setpoint as usual.
 
-In both cases the automatic schedule takes over again at the next window edge.
+The automatic schedule keeps running either way: the preset is switched on and
+off at the window edges, using the latest sleep temperature, and the edited
+sleep value survives a reboot.
 
 Switching the preset only changes the setpoint this thermostat reports — the
 adapter's setpoint register is **not** written, so the night value stays local.
