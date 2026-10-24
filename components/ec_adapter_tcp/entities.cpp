@@ -403,16 +403,10 @@ void EcAdapterTcpClimate::set_sleep_active_(bool active) {
     this->target_temperature = this->normal_target_;
   }
 
-  // The setpoint register is write-only, so it must be pushed explicitly when
-  // the night window changes the value the boiler should hold.
-  if (this->hub_ != nullptr) {
-    float multiplier = this->temperature_scale_ == 0.0f ? 1.0f : this->temperature_scale_;
-    uint16_t raw = (uint16_t) lroundf(this->target_temperature * multiplier);
-    if (!this->hub_->write_register(this->temperature_address_, raw))
-      ESP_LOGW(TAG, "Sleep preset: could not queue setpoint 0x%04X = %u",
-               this->temperature_address_, (unsigned) raw);
-  }
-
+  // The preset only changes the setpoint published by this thermostat: the
+  // adapter's setpoint register is left alone, so the night value never
+  // reaches the boiler. With auto_mode the new target is still what decides
+  // whether the adapter is engaged.
   this->apply_auto_mode_();
   this->publish_state();
   ESP_LOGI(TAG, "Sleep preset %s, target %.1f", active ? "on" : "off",

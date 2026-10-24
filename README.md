@@ -113,9 +113,10 @@ Manual control:
 
 In both cases the automatic schedule takes over again at the next window edge.
 
-The setpoint register (`0x0031`) is write-only, so the new night setpoint is
-pushed to the adapter on every switch; with `auto_mode: true` the thermostat
-then decides whether the adapter is engaged at that temperature.
+Switching the preset only changes the setpoint this thermostat reports — the
+adapter's setpoint register is **not** written, so the night value stays local.
+With `auto_mode: true` the new target is still what decides whether the adapter
+is engaged at the current temperature.
 
 ```yaml
 time:
