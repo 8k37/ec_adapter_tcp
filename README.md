@@ -86,3 +86,50 @@ boot the hub retries, then logs a warning instead of silently losing it.
 
 Everything except `ec_adapter_tcp_id` is optional. The defaults match the
 register map of the ectoControl adapters, so a minimal entry is enough:
+## Sleep (night) preset
+
+When `sleep_temperature` is configured the climate exposes the standard
+`sleep` preset and switches to it automatically:
+
+- from `sleep_start_hour` (inclusive, default `23`) until `sleep_end_hour`
+  (exclusive, default `7`) of the local time it reports
+  `preset: sleep` and uses `sleep_temperature` as its setpoint;
+- outside that window it reports `preset: none` and restores the normal
+  setpoint, which is kept in flash and never overwritten by the night value.
+
+The window may wrap around midnight, so the default `23 -> 7` means "23:00 to
+07:00". `sleep_start_hour` and `sleep_end_hour` must differ.
+
+Because the schedule is time driven, a `time` component is required whenever
+`sleep_temperature` is set: point `time_id` at it (e.g. the `homeassistant`
+time platform, which follows the Home Assistant local time zone).
+
+Manual control:
+
+- selecting the `sleep` preset by hand switches the night setpoint on
+  immediately, `none` switches it back;
+- changing the target temperature by hand leaves the sleep preset, so the
+  slider value is not immediately overwritten.
+
+In both cases the automatic schedule takes over again at the next window edge.
+
+The setpoint register (`0x0031`) is write-only, so the new night setpoint is
+pushed to the adapter on every switch; with `auto_mode: true` the thermostat
+then decides whether the adapter is engaged at that temperature.
+
+```yaml
+time:
+  - platform: homeassistant
+    id: ha_time
+
+climate:
+  - platform: ec_adapter_tcp
+    id: boiler
+    ec_adapter_tcp_id: adapter
+    name: "Boiler"
+    current_temperature_sensor: room_temperature
+    auto_mode: true
+    sleep_temperature: 17.5
+    sleep_start_hour: 23
+    sleep_end_hour: 7
+    time_id: ha_time

@@ -9,6 +9,7 @@
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/button/button.h"
 #include "esphome/components/climate/climate.h"
+#include "esphome/components/time/real_time_clock.h"
 #include "esphome/components/number/number.h"
 #include "esphome/components/select/select.h"
 #include "esphome/components/sensor/sensor.h"
@@ -148,6 +149,7 @@ class EcAdapterTcpButton : public Component, public button::Button {
 class EcAdapterTcpClimate : public Component, public climate::Climate, public EcAdapterTcpListener {
  public:
   void setup() override;
+  void loop() override;
   void dump_config() override;
   void on_registers_updated() override;
   climate::ClimateTraits traits() override;
@@ -179,6 +181,17 @@ class EcAdapterTcpClimate : public Component, public climate::Climate, public Ec
   // instead of starting the adapter.
   void set_auto_mode(bool auto_mode) { this->auto_mode_ = auto_mode; }
   void set_auto_mode_hysteresis(float hysteresis) { this->auto_mode_hysteresis_ = hysteresis; }
+  // Night preset. When configured, the climate reports the standard `sleep`
+  // preset and uses `temperature` as its setpoint between `start_hour`
+  // (inclusive) and `end_hour` (exclusive) of the local time. The normal
+  // setpoint is kept untouched and restored when the window ends.
+  void set_sleep_config(float temperature, uint8_t start_hour, uint8_t end_hour) {
+    this->sleep_temperature_ = temperature;
+    this->sleep_start_hour_ = start_hour;
+    this->sleep_end_hour_ = end_hour;
+    this->sleep_enabled_ = true;
+  }
+  void set_time(time::RealTimeClock *clock) { this->time_ = clock; }
 
   // Register an external temperature source (e.g. a Home Assistant sensor).
   void add_temperature_source(const std::string &name, sensor::Sensor *source);
@@ -202,6 +215,12 @@ class EcAdapterTcpClimate : public Component, public climate::Climate, public Ec
   // Thermostat step: hands the boiler to the adapter or back to its own panel
   // and updates `action`. Never changes `mode`. No-op when auto_mode_ is off.
   void apply_auto_mode_();
+  // True when `hour` (0..23, local time) falls inside the night window. The
+  // window may wrap around midnight (the default 23 -> 7 does).
+  bool is_sleep_window_(uint8_t hour) const;
+  // Switch the sleep preset on or off: swaps the published setpoint, writes it
+  // to the adapter and re-evaluates the thermostat. No-op when unchanged.
+  void set_sleep_active_(bool active);
 
   EcAdapterTcp *hub_{nullptr};
   uint16_t address_{0x0030};
@@ -217,6 +236,22 @@ class EcAdapterTcpClimate : public Component, public climate::Climate, public Ec
   float initial_target_temperature_{20.0f};
   bool auto_mode_{false};
   float auto_mode_hysteresis_{0.3f};
+  // Night preset state. `normal_target_` is the user's setpoint outside the
+  // night window; while sleeping the climate publishes `sleep_temperature_`
+  // instead, so leaving the window restores the previous setpoint.
+  bool sleep_enabled_{false};
+  bool sleep_active_{false};
+  float sleep_temperature_{18.0f};
+  uint8_t sleep_start_hour_{23};
+  uint8_t sleep_end_hour_{7};
+  float normal_target_{20.0f};
+  time::RealTimeClock *time_{nullptr};
+  uint32_t last_sleep_check_{0};
+  // Last evaluated state of the night window. The preset only changes on a
+  // window edge, so a manual override (user preset or setpoint change) is not
+  // fought by the scheduler until the next edge.
+  bool last_window_known_{false};
+  bool last_window_state_{false};
   ESPPreferenceObject pref_;
   ESPPreferenceObject mode_pref_;
   ESPPreferenceObject source_pref_;

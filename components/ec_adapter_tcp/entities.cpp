@@ -303,6 +303,9 @@ void EcAdapterTcpClimate::setup() {
   } else {
     this->target_temperature = this->initial_target_temperature_;
   }
+  // The sleep preset publishes its own setpoint; keep the user's setpoint
+  // aside so leaving the night window restores it.
+  this->normal_target_ = this->target_temperature;
 
   // Work mode is write-only too: persist the last commanded mode.
   this->mode_pref_ =
@@ -336,6 +339,7 @@ void EcAdapterTcpClimate::setup() {
   this->mode = have_mode ? (climate::ClimateMode) stored_mode : climate::CLIMATE_MODE_OFF;
   this->action = (this->mode == climate::CLIMATE_MODE_OFF) ? climate::CLIMATE_ACTION_OFF
                                                            : climate::CLIMATE_ACTION_IDLE;
+  this->preset = climate::CLIMATE_PRESET_NONE;
   this->publish_state();
 
   // Push the last known values back to the adapter on the first cycle after
@@ -376,6 +380,73 @@ void EcAdapterTcpClimate::set_active_source(const std::string &name) {
     }
   }
   ESP_LOGW(TAG, "Unknown temperature source '%s'", name.c_str());
+}
+
+bool EcAdapterTcpClimate::is_sleep_window_(uint8_t hour) const {
+  if (this->sleep_start_hour_ == this->sleep_end_hour_)
+    return false;
+  if (this->sleep_start_hour_ < this->sleep_end_hour_)
+    return hour >= this->sleep_start_hour_ && hour < this->sleep_end_hour_;
+  // The window wraps around midnight (the default 23 -> 7 does).
+  return hour >= this->sleep_start_hour_ || hour < this->sleep_end_hour_;
+}
+
+void EcAdapterTcpClimate::set_sleep_active_(bool active) {
+  if (this->sleep_active_ == active)
+    return;
+  this->sleep_active_ = active;
+  if (active) {
+    this->preset = climate::CLIMATE_PRESET_SLEEP;
+    this->target_temperature = this->sleep_temperature_;
+  } else {
+    this->preset = climate::CLIMATE_PRESET_NONE;
+    this->target_temperature = this->normal_target_;
+  }
+
+  // The setpoint register is write-only, so it must be pushed explicitly when
+  // the night window changes the value the boiler should hold.
+  if (this->hub_ != nullptr) {
+    float multiplier = this->temperature_scale_ == 0.0f ? 1.0f : this->temperature_scale_;
+    uint16_t raw = (uint16_t) lroundf(this->target_temperature * multiplier);
+    if (!this->hub_->write_register(this->temperature_address_, raw))
+      ESP_LOGW(TAG, "Sleep preset: could not queue setpoint 0x%04X = %u",
+               this->temperature_address_, (unsigned) raw);
+  }
+
+  this->apply_auto_mode_();
+  this->publish_state();
+  ESP_LOGI(TAG, "Sleep preset %s, target %.1f", active ? "on" : "off",
+           this->target_temperature);
+}
+
+void EcAdapterTcpClimate::loop() {
+  if (!this->sleep_enabled_ || this->time_ == nullptr)
+    return;
+  // The clock is read at most every 30 s: the preset only changes twice a day.
+  uint32_t now_ms = millis();
+  if (this->last_sleep_check_ != 0 && now_ms - this->last_sleep_check_ < 30000)
+    return;
+  this->last_sleep_check_ = now_ms;
+
+  auto now = this->time_->now();
+  if (!now.is_valid())
+    return;
+
+  bool in_window = this->is_sleep_window_(now.hour);
+  if (!this->last_window_known_) {
+    // First valid time after boot: adopt the schedule right away, so a reboot
+    // at 02:00 keeps the night setpoint.
+    this->last_window_known_ = true;
+    this->last_window_state_ = in_window;
+    this->set_sleep_active_(in_window);
+    return;
+  }
+  // Only react to a window edge: a manual preset or setpoint change inside the
+  // same window is not overwritten until the next edge.
+  if (in_window == this->last_window_state_)
+    return;
+  this->last_window_state_ = in_window;
+  this->set_sleep_active_(in_window);
 }
 
 void EcAdapterTcpClimate::apply_auto_mode_() {
@@ -480,11 +551,19 @@ void EcAdapterTcpClimate::dump_config() {
   if (this->auto_mode_)
     ESP_LOGCONFIG(TAG, "  Auto mode: on, hysteresis %.1f (mode stays as commanded, state in action)",
                   this->auto_mode_hysteresis_);
+  if (this->sleep_enabled_)
+    ESP_LOGCONFIG(TAG, "  Sleep preset: %.1f from %02u:00 to %02u:00 (%s), currently %s",
+                  this->sleep_temperature_, (unsigned) this->sleep_start_hour_,
+                  (unsigned) this->sleep_end_hour_,
+                  this->time_ != nullptr ? "time configured" : "no time source",
+                  this->sleep_active_ ? "active" : "inactive");
 }
 
 climate::ClimateTraits EcAdapterTcpClimate::traits() {
   climate::ClimateTraits traits;
   traits.set_supported_modes({climate::CLIMATE_MODE_OFF, climate::CLIMATE_MODE_HEAT});
+  if (this->sleep_enabled_)
+    traits.set_supported_presets({climate::CLIMATE_PRESET_NONE, climate::CLIMATE_PRESET_SLEEP});
   traits.set_visual_min_temperature(this->min_temperature_);
   traits.set_visual_max_temperature(this->max_temperature_);
   traits.set_visual_temperature_step(this->step_);
@@ -536,6 +615,18 @@ void EcAdapterTcpClimate::on_registers_updated() {
 void EcAdapterTcpClimate::control(const climate::ClimateCall &call) {
   bool changed = false;
 
+  if (call.get_preset().has_value() && this->sleep_enabled_) {
+    // Manual preset selection. The schedule re-applies sleep (or the normal
+    // setpoint) at the next window edge, so the night window keeps working.
+    if (*call.get_preset() == climate::CLIMATE_PRESET_SLEEP) {
+      this->set_sleep_active_(true);
+      changed = true;
+    } else if (*call.get_preset() == climate::CLIMATE_PRESET_NONE) {
+      this->set_sleep_active_(false);
+      changed = true;
+    }
+  }
+
   if (call.get_mode().has_value()) {
     climate::ClimateMode mode = *call.get_mode();
     if (this->auto_mode_ && mode != climate::CLIMATE_MODE_OFF) {
@@ -571,6 +662,13 @@ void EcAdapterTcpClimate::control(const climate::ClimateCall &call) {
     // The setpoint is local: store and publish it even when the adapter is
     // unreachable, so the UI never silently keeps an old value. The write is
     // queued and retried by the hub.
+    // A manual setpoint change ends the night preset: the user just asked for
+    // exactly this temperature. The schedule re-applies sleep at the next edge.
+    if (this->sleep_active_) {
+      this->sleep_active_ = false;
+      this->preset = climate::CLIMATE_PRESET_NONE;
+    }
+    this->normal_target_ = value;
     this->target_temperature = value;
     this->pref_.save(&value);
     changed = true;
